@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=JarnGrip
+Comment=Touch control pad on the bottom screen. Close pad gives the screen back to the desktop.
+Exec=env GDK_BACKEND=wayland /usr/bin/python3 /var/home/armada/.local/share/jarngrip/bin/jarngrip.py --desktop
+Icon=input-gaming
+Categories=Utility;Game;
+Terminal=false

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=JarnGrip
+Comment=Starts the JarnGrip pad on the bottom screen when Desktop Mode starts ("Also run in Desktop Mode" in Decky).
+Exec=env GDK_BACKEND=wayland /usr/bin/python3 /var/home/armada/.local/share/jarngrip/bin/jarngrip.py --desktop --autostart
+Icon=input-gaming
+OnlyShowIn=KDE;
+NoDisplay=true
+Terminal=false

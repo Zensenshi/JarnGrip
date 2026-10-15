@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[Unit]
+Description=JarnGrip - bottom screen touch controls
+After=armada-bottom-gamescope.service
+BindsTo=armada-bottom-gamescope.service
+PartOf=armada-bottom-gamescope.service
+Conflicts=armada-bottom-screen.service touch-master.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/armada-run-bottom -- /usr/bin/python3 /var/home/armada/.local/share/jarngrip/bin/jarngrip.py
+Environment=PYTHONUNBUFFERED=1
+Environment=GDK_BACKEND=x11
+Restart=no
+TimeoutStopSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=gamescope-session-plus@steam.service
