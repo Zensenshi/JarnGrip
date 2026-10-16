@@ -16,7 +16,7 @@ JarnGrip is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) 
 
 ## Install
 
-You need an AYN Thor with ArmadaOS and Decky Loader, and SSH access to it (Armada Tools → Remote Access shows its address). From a computer:
+You need an AYN Thor with ArmadaOS and Decky Loader, and SSH access to it (Armada Tools → Remote Access shows its address). On a computer, clone the repository (or download and unzip the latest [release](https://github.com/Zensenshi/JarnGrip/releases/latest)) and run the installer:
 
 ```sh
 git clone https://github.com/Zensenshi/JarnGrip.git
