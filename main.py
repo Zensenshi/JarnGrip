@@ -29,7 +29,7 @@ PAUSED_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada
 THEMES = ("classic", "charcoal", "dark", "glass")
 BACKGROUNDS = HOME / "Pictures/JarnGrip"
 PICTURE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
-# Desktop Mode: the pad in the KDE app menu, and started with the desktop when "Also run in Desktop Mode" is on.
+# Desktop Mode: the pad in the KDE app menu, and started with the desktop when "Start with Desktop Mode" is on.
 APP_MENU = HOME / ".local/share/applications/jarngrip.desktop"
 AUTOSTART = HOME / ".config/autostart/jarngrip.desktop"
 DEFAULT = {
@@ -135,7 +135,7 @@ def _install_runtime() -> bool:
 
 
 def _install_desktop_entries(autostart: bool) -> None:
-    """The Desktop Mode app-menu entry always; the autostart entry only while "Also run in Desktop Mode" is on. Neither
+    """The Desktop Mode app-menu entry always; the autostart entry only while "Start with Desktop Mode" is on. Neither
     touches the Game Mode service."""
     for target, source, wanted in ((APP_MENU, "jarngrip.desktop", True),
                                    (AUTOSTART, "jarngrip-autostart.desktop", autostart)):

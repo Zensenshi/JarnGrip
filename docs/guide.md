@@ -10,7 +10,7 @@
 
 ## The Decky panel
 
-- **Theme**, **haptics** strength, **burn-in protection**, a **24-hour clock**, and **Also run in Desktop Mode**.
+- **Theme**, **haptics** strength, **burn-in protection**, a **24-hour clock**, and **Start with Desktop Mode**.
 - **Remap a control**: pick a control, a key and any of **With Ctrl / Shift / Alt**, then save. **Reset to default** puts it back.
 - **Profiles**: saved sets of remaps. Load one, save to it, save as a new profile, or delete one.
 - **Trackpad sensitivity**, and **Stop and restore screen services**.
@@ -23,7 +23,7 @@ Put PNG, JPEG or WebP files in `~/Pictures/JarnGrip` on the Thor (for example wi
 
 ## Desktop Mode
 
-Turn on **Also run in Desktop Mode** in Decky, or start **JarnGrip** from the desktop's app menu. The pad opens fullscreen on the bottom screen without taking the keyboard focus from your game. **Close pad** gives the bottom screen back to the desktop.
+Start **JarnGrip** from the desktop's app menu, or turn on **Start with Desktop Mode** in Decky to have it open by itself whenever Desktop Mode starts. The pad opens fullscreen on the bottom screen without taking the keyboard focus from your game. **Close pad** gives the bottom screen back to the desktop.
 
 ## Troubleshooting
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The Decky option "Also run in Desktop Mode" is now "Start with Desktop Mode", which is what it does: the app-menu entry is there either way.
+
 ## 0.6.0
 
 - **Game Glass** theme: frosted glass buttons over a picture from `~/Pictures/JarnGrip`, with an adjustable blur.

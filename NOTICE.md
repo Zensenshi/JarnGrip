@@ -28,7 +28,7 @@ The pad's layout, behavior and Classic theme (`driver/bin/pad_model.py`, `driver
 
 The port was written by reading the launcher's Kotlin source, and it follows it closely: the page and button lists with their default keys, the layout rules, the modifier, click-button and keyboard behavior, and the Classic theme's color values. No Kotlin source file or image from the launcher is included, but a port this close is treated as a derivative work of a GPL-3.0 project, which is why JarnGrip as a whole is licensed under GPL-3.0.
 
-Written for this project and not ported: the Charcoal, Dark and Game Glass themes, button shading, haptics (`driver/bin/haptics.py`), the keyboard's trackpad and key previews, number swipes, the key picker, the header clock and battery (`driver/bin/system_status.py`), and the Game Glass theme.
+Written for this project and not ported: the Charcoal, Dark and Game Glass themes, button shading, haptics (`driver/bin/haptics.py`), the keyboard's trackpad and key previews, number swipes, the key picker, the header clock and battery (`driver/bin/system_status.py`), and Desktop Mode.
 
 ## Fonts (SIL Open Font License 1.1)
 
