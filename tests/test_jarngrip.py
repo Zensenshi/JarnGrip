@@ -1141,6 +1141,41 @@ def test_desktop_mode_adds_and_removes_the_autostart_entry():
         assert not main.AUTOSTART.exists() and main.APP_MENU.exists()
 
 
+def test_systemctl_goes_direct_and_never_runs_a_command_twice():
+    import subprocess
+    import main
+
+    runs = []
+
+    def run(direct_connects, answers):
+        def fake(cmd, **kwargs):
+            runs.append(cmd)
+            if "--machine=armada@.host" not in cmd and not direct_connects:
+                return subprocess.CompletedProcess(cmd, 1, "", "Failed to connect to user scope bus via local transport")
+            return subprocess.CompletedProcess(cmd, *answers)
+        return fake
+
+    real = main.subprocess.run, main._systemctl_form
+    try:
+        main._systemctl_form = None
+        main.subprocess.run = run(True, (3, "inactive\n", ""))
+        assert main._active("jarngrip.service") is False
+        assert runs == [["systemctl", "--user", "is-active", "jarngrip.service"]]  # once, and direct
+        runs.clear()
+        assert main._systemctl("start", "jarngrip.service") is False  # a failed start is not tried again
+        assert len(runs) == 1
+
+        main._systemctl_form, runs[:] = None, []
+        main.subprocess.run = run(False, (0, "active\n", ""))
+        assert main._active("jarngrip.service") is True
+        assert [("--machine=armada@.host" in cmd) for cmd in runs] == [False, True]  # direct failed: the fallback
+        runs.clear()
+        main._active("jarngrip.service")
+        assert len(runs) == 1 and "--machine=armada@.host" in runs[0]  # and from then on, the one that works
+    finally:
+        main.subprocess.run, main._systemctl_form = real
+
+
 def test_the_desktop_entries_start_the_same_driver_as_the_service():
     with open(os.path.join(ROOT, "systemd", "jarngrip.service"), encoding="utf-8") as f:
         driver = next(word for word in f.read().split() if word.endswith("jarngrip.py"))

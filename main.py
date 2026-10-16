@@ -74,16 +74,29 @@ def _user_env() -> dict:
     return dict(os.environ, XDG_RUNTIME_DIR=f"/run/user/{UID}", DBUS_SESSION_BUS_ADDRESS=f"unix:path=/run/user/{UID}/bus")
 
 
+# How the backend reaches the user's service manager. It runs as the user, so directly over the user's bus; the
+# --machine form goes through systemd-machined, which starts a bridge for every call and takes about a second, so it is
+# only the fallback for when the direct one cannot connect. Whichever works is kept.
+SYSTEMCTL_FORMS = (("systemctl", "--user"), ("systemctl", "--machine=armada@.host", "--user"))
+_systemctl_form: tuple | None = None
+
+
 def _user_systemctl(*args: str, timeout: int = 8) -> subprocess.CompletedProcess | None:
-    """systemctl --user for the armada user: the user's manager named explicitly first, then the plain form."""
-    for cmd in (["systemctl", "--machine=armada@.host", "--user", *args], ["systemctl", "--user", *args]):
+    """systemctl --user for the armada user, or None if no form of it could reach the user's manager. A command that ran
+    is never run again another way because of its answer: "is-active" answers "inactive" with a non-zero code."""
+    global _systemctl_form
+    for form in (_systemctl_form,) if _systemctl_form else SYSTEMCTL_FORMS:
         try:
-            done = subprocess.run(cmd, env=_user_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  timeout=timeout)
+            done = subprocess.run([*form, *args], env=_user_env(), text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None  # it reached the manager and ran, slowly: another form would only run it twice
         except (OSError, subprocess.SubprocessError):
             continue
-        if done.returncode == 0:
-            return done
+        if done.returncode != 0 and "Failed to connect" in done.stderr:
+            continue
+        _systemctl_form = form
+        return done
     return None
 
 
