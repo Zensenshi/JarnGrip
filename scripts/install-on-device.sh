@@ -81,6 +81,13 @@ if ! systemctl restart plugin_loader.service; then
   echo "Decky restart failed; new files kept at $FAILED and previous version restored when available." >&2
   exit 5
 fi
+# The AYN button's "Stop the screenshot" loads InputPlumber profiles, which InputPlumber's policy keeps to admins.
+install -d -m 0755 /etc/polkit-1/rules.d
+install -m 0644 -o root -g root "$PLUGIN_DIR/polkit/49-jarngrip-inputplumber.rules" /etc/polkit-1/rules.d/
+# The rule applies only while this marker exists. The user owns it, so that uninstalling from Decky, which runs as the
+# user, can delete it.
+install -d -m 0755 -o armada -g armada /var/lib/jarngrip
+install -m 0644 -o armada -g armada /dev/null /var/lib/jarngrip/installed
 # Keep the three newest backups.
 ls -1dt "$WORK"/jarngrip.* 2>/dev/null | tail -n +4 | while read -r old; do rm -rf "$old"; done
 echo "Installed JarnGrip. Open Steam > Decky > JarnGrip to enable it."

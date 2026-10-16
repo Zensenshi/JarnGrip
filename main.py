@@ -13,9 +13,26 @@ import asyncio
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
+
+try:
+    import decky  # Decky Loader's backend module; emit() sends an event to the plugin's frontend
+except ImportError:
+    decky = None
+
+
+def _log(text: str, error: bool = False) -> None:
+    """Into the plugin's Decky log (~/homebrew/logs/jarngrip/)."""
+    if decky:
+        (decky.logger.error if error else decky.logger.info)(text)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ayn_button  # noqa: E402
 
 PLUGIN = Path(__file__).resolve().parent
 HOME = Path("/var/home/armada")
@@ -25,6 +42,8 @@ CFG = HOME / ".config/jarngrip/config.json"
 # Which bottom-screen services the pad stopped to make room, so that stopping the pad can bring them back.
 MARKER = HOME / ".local/state/jarngrip/restore.json"
 UNIT = "jarngrip.service"
+UNIT_FILE = HOME / ".config/systemd/user" / UNIT
+LISTENER_FILE = UNIT_FILE.parent / "jarngrip-ayn.service"
 PAUSED_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada-bottom-screen.service"))
 THEMES = ("classic", "charcoal", "dark", "glass")
 BACKGROUNDS = HOME / "Pictures/JarnGrip"
@@ -32,9 +51,21 @@ PICTURE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
 # Desktop Mode: the pad in the KDE app menu, and started with the desktop when "Start with Desktop Mode" is on.
 APP_MENU = HOME / ".local/share/applications/jarngrip.desktop"
 AUTOSTART = HOME / ".config/autostart/jarngrip.desktop"
+# The AYN button below the screen (see ayn_button.py): looked for every few seconds, as InputPlumber's virtual devices
+# come and go, and the profile change that stops its screenshot, kept here so that turning it off can undo it.
+WATCH_RETRY_S = 5
+AYN_STATE = HOME / ".local/state/jarngrip/inputplumber.json"
+# The backend cannot read /dev/input: Decky runs it as the user but without the user's groups. A user service has them,
+# so jarngrip-ayn.service (driver/bin/ayn_listen.py) listens and writes a byte per press into this FIFO.
+LISTENER = "jarngrip-ayn.service"
+AYN_FIFO = Path(f"/run/user/{UID}/jarngrip-ayn")
+# The installer's marker: the polkit rule lets the user load InputPlumber profiles only while it exists.
+INSTALLED_MARKER = Path("/var/lib/jarngrip/installed")
 DEFAULT = {
     "enabled": False, "page": "Interface", "sensitivity": 1.0, "theme": "classic", "haptics": True,
     "haptics_strength": 1.0, "burn_in": True, "clock_24h": False, "background_image": "", "glass_blur": 3, "desktop_mode": False,
+    "shortcut": True, "shortcut_buttons": [1 << 13 | 1 << 14, 0], "ayn_button": False,
+    "ayn_no_screenshot": False,
     "bindings": {}, "profiles": {"Default": {"bindings": {}}}, "active_profile": "Default",
 }
 
@@ -125,9 +156,9 @@ def _install_runtime() -> bool:
     _mkdir(APP / "fonts")
     for source in (PLUGIN / "driver/fonts").iterdir():
         changed |= _copy_if_changed(source, APP / "fonts" / source.name, 0o644)
-    unit_dir = HOME / ".config/systemd/user"
-    _mkdir(unit_dir)
-    changed |= _copy_if_changed(PLUGIN / "systemd" / UNIT, unit_dir / UNIT, 0o644)
+    _mkdir(UNIT_FILE.parent)
+    changed |= _copy_if_changed(PLUGIN / "systemd" / UNIT, UNIT_FILE, 0o644)
+    changed |= _copy_if_changed(PLUGIN / "systemd" / LISTENER_FILE.name, LISTENER_FILE, 0o644)
     if changed:
         _systemctl("daemon-reload")
     _install_desktop_entries(bool(_read().get("desktop_mode")))
@@ -164,6 +195,19 @@ def _restore_paused() -> None:
             _systemctl("start", unit)
 
 
+def _open_fifo(path: Path) -> int:
+    """The FIFO the AYN button listener writes presses into, made if missing and opened for reading. Opened read-write,
+    so that it always has a writer: with none, a FIFO reads as ended and would wake the reader over and over."""
+    try:
+        if path.exists() and not stat.S_ISFIFO(path.stat().st_mode):
+            path.unlink()
+        if not path.exists():
+            os.mkfifo(path, 0o600)
+    except OSError as err:
+        _log(f"AYN button: cannot make {path}: {err.strerror}", error=True)
+    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+
 def _number(value, low: float, high: float, default: float) -> float:
     try:
         return max(low, min(high, float(value)))
@@ -172,15 +216,110 @@ def _number(value, low: float, high: float, default: float) -> float:
 
 
 class Plugin:
+    _ignore_until = 0.0  # AYN button presses before this (time.monotonic()) queued up during a toggle
+    _ayn_error = ""      # what went wrong the last time the AYN button's screenshot was changed
+    _ayn_lock = None
+
     async def _main(self):
         changed = _install_runtime()
         # Apply updates to a running pad, but never auto-start after a Decky reload. A stale enabled flag must not
         # grab the digitizer during a Game Mode -> Desktop Mode transition (Ratatoskr issue #34).
         if changed and _active(UNIT):
             _systemctl("restart", UNIT)
+        if changed and _active(LISTENER):
+            _systemctl("restart", LISTENER)
+        self._fifo = _open_fifo(AYN_FIFO)
+        loop = asyncio.get_running_loop()
+        self._tasks = [loop.create_task(self._read_presses(self._fifo)), loop.create_task(self._watch_ayn_button())]
+
+    async def _unload(self):
+        for task in getattr(self, "_tasks", []):
+            task.cancel()
+        if getattr(self, "_fifo", -1) >= 0:
+            os.close(self._fifo)
+            self._fifo = -1
+        _systemctl("stop", LISTENER)
+        # Only while JarnGrip runs: without it, a button that no longer takes screenshots would do nothing at all.
+        await self._sync_screenshot(False)
+
+    async def _uninstall(self):
+        """Decky is removing the plugin (from its settings, or "Uninstall JarnGrip" in the panel): put back what JarnGrip
+        changed and remove what it put in the user's home, as the uninstall script does. The settings stay. Root's files
+        cannot go from here: the installer's backups and the polkit rule stay, but deleting the user's own marker makes
+        the rule stop applying (see polkit/49-jarngrip-inputplumber.rules)."""
+        await self._sync_screenshot(False)
+        for unit in (UNIT, LISTENER):
+            _systemctl("stop", unit)
+        _restore_paused()
+        for path in (UNIT_FILE, LISTENER_FILE, APP_MENU, AUTOSTART, AYN_STATE, INSTALLED_MARKER, AYN_FIFO):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(APP, ignore_errors=True)
+        _systemctl("daemon-reload")
+
+    async def _sync_screenshot(self, wanted: bool | None = None) -> str:
+        """Stop or bring back the AYN button's screenshot to match the settings (or wanted). InputPlumber is asked
+        from a thread: each call can take a moment."""
+        if wanted is None:
+            cfg = _read()
+            wanted = bool(cfg.get("ayn_button") and cfg.get("ayn_no_screenshot"))
+        if self._ayn_lock is None:
+            self._ayn_lock = asyncio.Lock()
+        async with self._ayn_lock:
+            self._ayn_error = await asyncio.to_thread(ayn_button.sync, wanted, AYN_STATE)
+        return self._ayn_error
+
+    async def _watch_ayn_button(self):
+        """For as long as the plugin runs, every few seconds: keep the listener running while "AYN button" is on, and
+        the screenshot setting applied, since InputPlumber forgets it when it restarts."""
+        _log("AYN button: watching")
+        while True:
+            # Nothing that goes wrong in one round may end the watching: the button would go dead until Decky restarts.
+            try:
+                await self._watch_round()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001
+                _log(f"AYN button: {type(err).__name__}: {err}", error=True)
+            await asyncio.sleep(WATCH_RETRY_S)
+
+    async def _watch_round(self):
+        wanted = bool(_read().get("ayn_button"))
+        if wanted != await asyncio.to_thread(_active, LISTENER):
+            started = await asyncio.to_thread(_systemctl, "start" if wanted else "stop", LISTENER)
+            _log(f"AYN button: listener {'started' if wanted else 'stopped'}" if started
+                 else f"AYN button: could not {'start' if wanted else 'stop'} {LISTENER}", error=not started)
+        before = self._ayn_error
+        if await self._sync_screenshot() != before:
+            _log(f"AYN button: {self._ayn_error or 'screenshot setting applied'}", error=bool(self._ayn_error))
+
+    async def _read_presses(self, fd: int):
+        """Toggle the pad on each press the listener reports (a byte each) while "AYN button" is on."""
+        loop = asyncio.get_running_loop()
+        ready = asyncio.Event()
+        loop.add_reader(fd, ready.set)
+        try:
+            while True:
+                await ready.wait()
+                ready.clear()
+                try:
+                    data = os.read(fd, 64)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    return  # only in tests: the backend holds the FIFO's write end itself, so it never ends
+                # Presses that queued up while the pad was starting or stopping are not a new request.
+                if time.monotonic() >= self._ignore_until and _read().get("ayn_button"):
+                    _log("AYN button: pressed, toggling the pad")
+                    result = await self.set_enabled(not _active(UNIT))
+                    self._ignore_until = time.monotonic() + 0.5
+                    if decky:
+                        await decky.emit("jarngrip_toggled", result)
+        finally:
+            loop.remove_reader(fd)
 
     async def get_status(self):
-        return {"enabled": _active(UNIT), "profile": _read().get("active_profile", "Default")}
+        return {"enabled": _active(UNIT), "profile": _read().get("active_profile", "Default"),
+                "ayn_error": self._ayn_error}
 
     async def get_config(self):
         return _read()
@@ -216,21 +355,30 @@ class Plugin:
         if not isinstance(cfg, dict):
             return {"ok": False, "error": "expected a configuration object"}
         current = _read()
+        ayn_before = (current.get("ayn_button"), current.get("ayn_no_screenshot"))
         if isinstance(cfg.get("bindings"), dict):
             current["bindings"] = cfg["bindings"]
         current["sensitivity"] = _number(cfg.get("sensitivity"), 0.2, 3.0, current["sensitivity"])
         current["haptics_strength"] = _number(cfg.get("haptics_strength"), 0.05, 1.0, current["haptics_strength"])
         current["glass_blur"] = int(_number(cfg.get("glass_blur"), 1, 5, current["glass_blur"]))
-        for key in ("haptics", "burn_in", "clock_24h", "desktop_mode"):
+        for key in ("haptics", "burn_in", "clock_24h", "desktop_mode", "shortcut", "ayn_button", "ayn_no_screenshot"):
             if key in cfg:
                 current[key] = bool(cfg[key])
         if "desktop_mode" in cfg:
             _install_desktop_entries(current["desktop_mode"])
+        buttons = cfg.get("shortcut_buttons")  # [ulButtons, ulUpperButtons] masks from Steam, as the panel records them
+        if (isinstance(buttons, list) and len(buttons) == 2 and all(type(m) is int and 0 <= m < 1 << 32 for m in buttons)
+                and any(buttons)):
+            current["shortcut_buttons"] = buttons
         if cfg.get("theme") in THEMES:
             current["theme"] = cfg["theme"]
         if cfg.get("background_image") == "" or cfg.get("background_image") in _backgrounds():
             current["background_image"] = cfg["background_image"]
         _write(current)
+        if (current.get("ayn_button"), current.get("ayn_no_screenshot")) != ayn_before:
+            await self._watch_round()  # now, rather than within the next few seconds
+            if self._ayn_error:
+                return {"ok": True, "config": current, "error": self._ayn_error}
         return {"ok": True, "config": current}
 
     async def list_backgrounds(self):

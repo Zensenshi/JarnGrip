@@ -23,6 +23,58 @@ const comboOf=(cfg,control)=>{const v=(cfg.bindings||{})[control],mods=defaultMo
 const comboText=c=>[...sortMods(c.mods).map(m=>m[0].toUpperCase()+m.slice(1)),keyLabel[c.key]||`key code ${c.key}`].join(" + ");
 // Theme ids as in driver/bin/pad_model.py.
 const themeOptions=[{data:"classic",label:"Classic (stone and gold)"},{data:"charcoal",label:"Charcoal (slate and blue)"},{data:"dark",label:"Dark (pure black)"},{data:"glass",label:"Game Glass (your picture)"}];
+// The shortcut opens or closes the pad from anywhere in Game Mode, a game included. Steam reports every controller's
+// buttons to Decky's frontend whether or not this panel is open, as two bitmasks: ulButtons and ulUpperButtons. The
+// shortcut is a pair of masks, [buttons, upper], all of which must be down; Home + Start by default, or whatever
+// "Change" records (the AYN button, if Steam reports it).
+const DEFAULT_SHORTCUT=[1<<13|1<<14,0];
+// Touch sensing (touchpads, thumbsticks) is not a press, so it never becomes part of a recorded shortcut.
+const TOUCH=[0xf<<17,3<<14];
+const BUTTON_NAMES=[{0:"R2",1:"L2",2:"R1",3:"L1",4:"Y",5:"B",6:"X",7:"A",8:"Up",9:"Right",10:"Left",11:"Down",12:"Select",13:"Home",14:"Start",15:"L5",16:"R5",22:"L3",26:"R3"},{9:"L4",10:"R4",18:"Quick Access"}];
+const shortcutText=masks=>masks.flatMap((m,i)=>[...Array(32).keys()].filter(b=>(m>>>b)&1).map(b=>BUTTON_NAMES[i][b]||`button ${i?"U":""}${b}`)).join(" + ");
+const validShortcut=v=>Array.isArray(v)&&v.length===2&&v.every(Number.isInteger)&&(v[0]||v[1])?v.map(m=>m>>>0):DEFAULT_SHORTCUT;
+// The AYN button below the screen, while its switch is on. With InputPlumber emulating a Steam Deck controller and the
+// screenshot left on, it arrives here as Home + R1, Steam's screenshot chord, so that chord toggles the pad too. Any
+// other way, it arrives as a key Steam does not report, which the backend's listener hears instead: a press only ever
+// comes one of the two ways. With "Stop the screenshot" on it is always that key, so the chord is left to Steam.
+const AYN_CHORD=[1<<13|1<<2,0];
+let shortcutOn=true,shortcut=DEFAULT_SHORTCUT,aynChord=false,toggling=false,recording=null;
+const setAyn=c=>{aynChord=!!c.ayn_button&&!c.ayn_no_screenshot};
+const comboDown=new Map();  // controller index -> whether the shortcut was held at its last report
+const latest=new Map();     // controller index -> its buttons at its last report
+const homeButtons=on=>{try{DFL.Router?.[on?"EnableHomeAndQuickAccessButtons":"DisableHomeAndQuickAccessButtons"]?.()}catch{}};
+const toggleFromShortcut=async()=>{
+ toggling=true;
+ homeButtons(false);  // a Home or Quick Access press in the shortcut must not also open Steam's menus
+ setTimeout(()=>homeButtons(true),1000);
+ try{
+  const r=await call("set_enabled",!(await call("get_status")).enabled);
+  api.toaster?.toast({title:"JarnGrip",body:r.error||(r.enabled?"Pad on":"Pad off")});
+ }catch(e){console.error("[jarngrip] shortcut",e)}
+ finally{toggling=false}
+};
+// Record the next press as the shortcut: wait for every button to be up (the A press on "Change" is still down), then
+// collect every button pressed until all are up again. Resolves with [buttons, upper], or null after 10 s of nothing.
+const recordShortcut=()=>new Promise(resolve=>{
+ const done=masks=>{clearTimeout(recording.timer);recording=null;resolve(masks)};
+ recording={armed:[...latest.values()].every(m=>!m[0]&&!m[1]),masks:[0,0],done,timer:setTimeout(()=>done(null),10000)};
+});
+const onControllerState=changes=>{
+ for(const c of changes||[]){
+  const now=[(c.ulButtons&~TOUCH[0])>>>0,(c.ulUpperButtons&~TOUCH[1])>>>0];
+  latest.set(c.unControllerIndex,now);
+  if(recording){
+   if(!recording.armed){recording.armed=!now[0]&&!now[1];continue}
+   recording.masks=recording.masks.map((m,i)=>(m|now[i])>>>0);
+   if(!now[0]&&!now[1]&&(recording.masks[0]||recording.masks[1]))recording.done(recording.masks);
+   continue;
+  }
+  const held=masks=>now.every((m,i)=>((m&masks[i])>>>0)===masks[i]);
+  const down=(shortcutOn&&held(shortcut))||(aynChord&&held(AYN_CHORD));
+  if(down&&!comboDown.get(c.unControllerIndex)&&!toggling)toggleFromShortcut();
+  comboDown.set(c.unControllerIndex,down);
+ }
+};
 function Content(){
  const [status,setStatus]=SP_REACT.useState({enabled:false});
  const [cfg,setCfg]=SP_REACT.useState({bindings:{},profiles:{},active_profile:"Default",sensitivity:1,theme:"classic",haptics:true,haptics_strength:1,burn_in:true,clock_24h:false,desktop_mode:false});
@@ -47,11 +99,30 @@ function Content(){
  const saveProfile=async name=>{const r=apply(await call("save_profile",name));if(r&&r.ok)setNewProfile("")};
  const deleteProfile=async()=>apply(await call("delete_profile",profile));
  const profileOptions=Object.keys(cfg.profiles||{Default:{}}).map(x=>({data:x,label:x}));
- const setSetting=async(key,v)=>{const n={...cfg,[key]:v};setCfg(n);const r=await call("save_config",n);if(r.config)setCfg(r.config)};
+ const setSetting=async(key,v)=>{const n={...cfg,[key]:v};setCfg(n);const r=await call("save_config",n);if(r.config)setCfg(r.config);if(r.error)setMessage(r.error)};
  const setSensitivity=v=>setSetting("sensitivity",v);
+ const setShortcut=v=>{shortcutOn=v;setSetting("shortcut",v)};
+ // Decky's own uninstall, with its confirmation: it calls the backend's _uninstall first, which puts back the bottom
+ // screen and the AYN button and removes what JarnGrip installed in the home folder.
+ const uninstall=()=>{const loader=window.DeckyPluginLoader;
+  if(loader?.uninstallPlugin)loader.uninstallPlugin("JarnGrip","Uninstall JarnGrip","Uninstall","Stops the pad, gives the bottom screen and the AYN button back, and removes JarnGrip. Your settings and profiles are kept.");
+  else setMessage("Uninstall JarnGrip from Decky's settings: Plugins, then the menu next to JarnGrip.")};
+ const [recordingNow,setRecordingNow]=SP_REACT.useState(false);
+ const changeShortcut=async()=>{
+  setRecordingNow(true);setMessage("Press the button or buttons for the shortcut, then let go.");
+  const masks=await recordShortcut();
+  setRecordingNow(false);
+  if(!masks){setMessage("No button was seen: Steam does not report that button to plugins. For the AYN button, use the switch below.");return}
+  shortcut=masks;setMessage(`Shortcut: ${shortcutText(masks)}`);await setSetting("shortcut_buttons",masks);
+ };
  return jsxs(DFL.PanelSection,{title:"Bottom-screen controls",children:[
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:"Enable JarnGrip",description:status.enabled?"The bottom screen pad is active.":"Starts the GTK touch pad in Armada's bottom gamescope session.",checked:!!status.enabled,onChange:toggle})}),
-  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Status",description:message||(status.enabled?`Running • profile ${cfg.active_profile||"Default"}`:"Stopped. Bound to the bottom gamescope session.")})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Status",description:message||status.ayn_error||(status.enabled?`Running • profile ${cfg.active_profile||"Default"}`:"Stopped. Bound to the bottom gamescope session.")})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:`Shortcut: ${shortcutText(validShortcut(cfg.shortcut_buttons))}`,description:"Opens or closes the pad from anywhere, even in a game.",checked:cfg.shortcut!==false,onChange:setShortcut})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",disabled:recordingNow,onClick:changeShortcut,children:recordingNow?"Press it now…":"Change shortcut"})}),
+  ...(validShortcut(cfg.shortcut_buttons).join()!==DEFAULT_SHORTCUT.join()?[jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:()=>{shortcut=DEFAULT_SHORTCUT;setSetting("shortcut_buttons",DEFAULT_SHORTCUT)},children:"Back to Home + Start"})},"reset-shortcut")]:[]),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:"AYN button",description:"The AYN button below the screen opens or closes the pad. While it still takes screenshots, so does Home + R1.",checked:!!cfg.ayn_button,onChange:v=>{setAyn({...cfg,ayn_button:v});setSetting("ayn_button",v)}})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:"Stop the screenshot",description:"The AYN button sends F24, a key nothing uses, instead of taking a screenshot. It stays that way until you turn this off or uninstall JarnGrip.",checked:!!cfg.ayn_no_screenshot,disabled:!cfg.ayn_button,onChange:v=>{setAyn({...cfg,ayn_no_screenshot:v});setSetting("ayn_no_screenshot",v)}})}),
   jsxs(DFL.PanelSection,{title:"Appearance and feel",children:[jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Theme",childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:({steamos:"charcoal",oled:"dark"})[cfg.theme]||cfg.theme||"classic",rgOptions:themeOptions,onChange:opt=>setSetting("theme",opt.data)})})}),
    ...(cfg.theme==="glass"?[
     jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Background picture",description:`Add pictures to ${pictures.folder}, then reopen this menu.`,childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:cfg.background_image||"",rgOptions:[{data:"",label:"Built-in colors"},...pictures.pictures.map(p=>({data:p,label:p}))],onChange:opt=>setSetting("background_image",opt.data)})})},"picture"),
@@ -71,7 +142,14 @@ function Content(){
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Number block",description:"Slots 1 to 12 are the number block. A swipe on a number adds Shift (up) or Ctrl (down) to what it sends; left cancels it."})})]}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.SliderField,{label:`Trackpad sensitivity: ${Number(cfg.sensitivity||1).toFixed(1)}×`,value:Number(cfg.sensitivity||1),min:.2,max:3,step:.1,showValue:true,onChange:setSensitivity})}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:()=>toggle(false),children:"Stop and restore screen services"})}),
-  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Desktop Mode safety",description:"Stops with Armada bottom gamescope and never auto-restarts. Re-enable from Decky after returning to Game Mode."})})
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:uninstall,children:"Uninstall JarnGrip"})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Desktop Mode safety",description:"Stops with Armada bottom gamescope and never auto-restarts. Turn it back on here or with the shortcut after returning to Game Mode."})})
  ]});
 }
-export default function(){return {name:"JarnGrip",content:jsx(Content,{}),icon:jsx("svg",{xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 24 24",width:24,height:24,fill:"none",stroke:"currentColor",strokeWidth:2,children:jsxs("g",{children:[jsx("path",{d:"M14 4 20 2l-2 6-9 9-4-4 9-9Z"}),jsx("path",{d:"m7 14-4 7 7-4M15 5l4 4"})]})}),onDismount(){}}}
+export default function(){
+ const input=window.SteamClient?.Input?.RegisterForControllerStateChanges?.(onControllerState);
+ // The backend toggles the pad for the AYN button itself, and says so here for the toast.
+ const onToggled=r=>api.toaster?.toast({title:"JarnGrip",body:r?.error||(r?.enabled?"Pad on":"Pad off")});
+ api.addEventListener?.("jarngrip_toggled",onToggled);
+ call("get_config").then(c=>{shortcutOn=c.shortcut!==false;shortcut=validShortcut(c.shortcut_buttons);setAyn(c)}).catch(()=>{});
+ return {name:"JarnGrip",content:jsx(Content,{}),icon:jsx("svg",{xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 24 24",width:24,height:24,fill:"none",stroke:"currentColor",strokeWidth:2,children:jsxs("g",{children:[jsx("path",{d:"M14 4 20 2l-2 6-9 9-4-4 9-9Z"}),jsx("path",{d:"m7 14-4 7 7-4M15 5l4 4"})]})}),onDismount(){input?.unregister?.();api.removeEventListener?.("jarngrip_toggled",onToggled)}}}

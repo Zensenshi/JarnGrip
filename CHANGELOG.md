@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0
+
+- **Open and close the pad in one press**, from anywhere in Game Mode, a game included, so the bottom screen can go back to another app and come back to the pad without opening Decky. A toast says which.
+  - **Home + Start** by default. **Change shortcut** in Decky records another button or combination, and the shortcut can be turned off.
+  - **AYN button** (off by default): the button below the screen does it too. A small listener, `jarngrip-ayn.service`, hears it, because the Decky backend cannot read input devices.
+  - **Stop the screenshot** (off by default): the AYN button no longer takes a screenshot. JarnGrip loads InputPlumber's profile again with that one button sending F24 instead; no file changes. JarnGrip applies it again each time it starts, and puts the old profile back when the setting is turned off or JarnGrip is uninstalled. The installer adds a polkit rule that allows this, and it applies only while JarnGrip is installed.
+- **Uninstall JarnGrip** at the bottom of the Decky panel, using Decky's own uninstall. Uninstalling from Decky, there or in its settings, now also stops the pad, gives the bottom screen and the AYN button back, and removes the services and driver from the home folder, like the uninstall script. Settings and profiles are kept.
+
 ## 0.6.1
 
 - The Decky option "Also run in Desktop Mode" is now "Start with Desktop Mode", which is what it does: the app-menu entry is there either way.

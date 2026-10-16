@@ -12,6 +12,7 @@ JarnGrip is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) 
 - **Four themes**: Classic, Charcoal, Dark, and Game Glass over a picture of your choice.
 - **Haptics**, a **clock and battery**, and **burn-in protection** for the OLED screen.
 - **Remap any button** from Decky, and keep sets of remaps as profiles.
+- **One press** to open or close it in a game: Home + Start, or the AYN button below the screen.
 - Runs in **Game Mode** and, optionally, **Desktop Mode**.
 
 ## Install
@@ -35,7 +36,7 @@ Then open **Steam menu → Decky → JarnGrip** and turn the pad on.
 | Swipe down | Ctrl + number |
 | Swipe left | nothing (cancel) |
 
-The buttons along the top switch pages, open the **trackpad**, the **keyboard** and the **settings** (gear), where you'll find the themes, **Unstick keys** and **Close pad**.
+Press **Home + Start** to open or close the pad at any time, even in a game. Decky can change the shortcut, or let the AYN button below the screen do it. The buttons along the top switch pages, open the **trackpad**, the **keyboard** and the **settings** (gear), where you'll find the themes, **Unstick keys** and **Close pad**.
 
 Two tips:
 
@@ -48,11 +49,15 @@ More in the [guide](docs/guide.md).
 
 ## Uninstall
 
+**Uninstall JarnGrip** at the bottom of its Decky panel, or from a computer:
+
 ```sh
 ./scripts/uninstall-from-pc.sh armada@THOR_IP
 ```
 
 Your settings stay in `~/.config/jarngrip/` on the Thor.
+
+The installer adds one file outside the plugin: a polkit rule in `/etc/polkit-1/rules.d/` that lets JarnGrip change what the AYN button does, for **Stop the screenshot**. Uninstalling gives the button its screenshot back; the script also removes the rule, and from Decky the rule stops applying once JarnGrip is gone.
 
 ## Credits
 

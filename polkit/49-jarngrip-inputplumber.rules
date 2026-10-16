@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Installed by JarnGrip, removed by its uninstaller. Lets the armada user load InputPlumber input profiles, which the
+// JarnGrip Decky plugin does for "Stop the screenshot" on the AYN button. InputPlumber's own policy asks for an admin
+// password for that, and the plugin runs as the user, with no way to give one.
+//
+// It applies only while JarnGrip is installed. Removed from Decky, the plugin cannot delete this root-owned file, but it
+// can delete the installer's marker, /var/lib/jarngrip/installed, which the user owns. The marker lives outside the
+// home folder because polkit.spawn runs as polkitd, which cannot look inside it; spawn throws when the command fails.
+polkit.addRule(function (action, subject) {
+    if ((action.id == "org.shadowblip.Input.CompositeDevice.LoadProfileFromYaml" ||
+         action.id == "org.shadowblip.Input.CompositeDevice.LoadProfilePath") &&
+        subject.user == "armada") {
+        try {
+            polkit.spawn(["/usr/bin/test", "-f", "/var/lib/jarngrip/installed"]);
+        } catch (error) {
+            return polkit.Result.NOT_HANDLED;
+        }
+        return polkit.Result.YES;
+    }
+});

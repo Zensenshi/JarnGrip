@@ -5,9 +5,13 @@
 (or pytest)."""
 import math
 import os
+import re
+import struct
 import sys
 import tempfile
+import time
 import types
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "driver"))
@@ -789,6 +793,338 @@ def test_the_backend_keeps_what_a_save_leaves_out_and_ignores_nonsense():
         assert (cfg["sensitivity"], cfg["theme"], cfg["haptics"], cfg["glass_blur"]) == (2.5, "dark", False, 5)
         assert cfg["bindings"] == {}
         assert call("save_config", {"background_image": "../../etc/passwd"})["config"]["background_image"] == ""
+
+
+def test_the_shortcut_setting_defaults_on_and_saves():
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        assert call("get_config")["shortcut"] is True
+        assert call("save_config", {"shortcut": False})["config"]["shortcut"] is False
+        assert call("save_config", {"theme": "dark"})["config"]["shortcut"] is False  # other settings leave it alone
+        assert call("get_config")["shortcut_buttons"] == [1 << 13 | 1 << 14, 0]  # Home + Start
+        for bad in ([0, 0], [1 << 32, 0], [-1, 0], [1], "x", [True, 0]):
+            assert call("save_config", {"shortcut_buttons": bad})["config"]["shortcut_buttons"] == [1 << 13 | 1 << 14, 0]
+        assert call("save_config", {"shortcut_buttons": [0, 1 << 31]})["config"]["shortcut_buttons"] == [0, 1 << 31]
+
+
+# The profile InputPlumber had loaded on a Thor, as GetProfileYaml returned it (2026-10-16).
+THOR_PROFILE = (
+    "version: 1\nkind: DeviceProfile\nname: Default\nmapping:\n- name: LeftTop\n  source_event:\n    gamepad:\n"
+    "      button: LeftTop\n  target_events:\n  - gamepad:\n      button: LeftPaddle1\n- name: QuickAccess2\n"
+    "  source_event:\n    gamepad:\n      button: QuickAccess2\n  target_events:\n  - gamepad:\n"
+    "      button: Screenshot\n- name: Left Dial Clockwise\n  source_event:\n    gamepad:\n      dial:\n"
+    "        name: LeftStickDial\n        direction: clockwise\n  target_events:\n  - keyboard: KeyVolumeUp\n")
+
+
+def test_the_ayn_button_is_heard_as_record_on_the_pad_or_f24_on_the_keyboard():
+    import ayn_listen as ayn_button
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sys_dir = Path(tmp)
+        bits = struct.calcsize("L") * 8
+
+        def device(event, name, *codes):
+            value = sum(1 << c for c in codes)
+            words = [(value >> (bits * i)) & ((1 << bits) - 1) for i in range(768 // bits)]
+            folder = sys_dir / event / "device"
+            (folder / "capabilities").mkdir(parents=True)
+            (folder / "capabilities/key").write_text(" ".join(f"{w:x}" for w in reversed(words)).lstrip("0 ") or "0")
+            (folder / "name").write_text(name + "\n")
+
+        device("event3", "gpio-keys-ayn", ayn_button.KEY_RECORD)                            # not a pad
+        device("event7", "AYN Odin2 Gamepad", ayn_button.BTN_SOUTH)                         # no Record key
+        device("event11", "Microsoft X-Box 360 pad 0", ayn_button.BTN_SOUTH, ayn_button.KEY_RECORD)
+        device("event13", "Thor Virtual Keyboard", ayn_button.KEY_F24)                      # JarnGrip's own keyboard
+        device("event14", "InputPlumber Keyboard", ayn_button.KEY_F24, ayn_button.KEY_RECORD)
+        assert ayn_button.sources(sys_dir, Path("/dev/input")) == [
+            (Path("/dev/input/event11"), ayn_button.KEY_RECORD), (Path("/dev/input/event14"), ayn_button.KEY_F24)]
+
+    press = lambda code, value: ayn_button.INPUT_EVENT.pack(0, 0, ayn_button.EV_KEY, code, value)
+    data = press(167, 1) + press(167, 2) + press(167, 0) + press(194, 1)
+    assert ayn_button.presses(data, 167) == 1 and ayn_button.presses(data, 194) == 1
+    assert ayn_button.presses(data[:-3], 194) == 0  # a torn last event is left alone
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fifo = Path(tmp) / "jarngrip-ayn"
+        ayn_button.tell(fifo, 1)  # no backend yet: dropped, no error
+        os.mkfifo(fifo)
+        ayn_button.tell(fifo, 1)  # made but nobody reading: dropped
+        reader = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            ayn_button.tell(fifo, 2)
+            assert os.read(reader, 64) == b"pp"
+        finally:
+            os.close(reader)
+
+
+def test_the_press_fifo_is_made_and_never_reads_as_ended():
+    import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fifo = Path(tmp) / "jarngrip-ayn"
+        fifo.write_text("left over")  # not a FIFO: replaced
+        fd = main._open_fifo(fifo)
+        try:
+            assert stat_is_fifo(fifo)
+            try:
+                os.read(fd, 64)
+                raise AssertionError("read something, or an end, from an empty FIFO")
+            except BlockingIOError:
+                pass  # no writer but itself: waits, rather than reading as ended
+        finally:
+            os.close(fd)
+
+
+def stat_is_fifo(path):
+    import stat
+
+    return stat.S_ISFIFO(os.stat(path).st_mode)
+
+
+def test_the_ayn_listener_service_runs_the_installed_listener():
+    with open(os.path.join(ROOT, "systemd", "jarngrip-ayn.service"), encoding="utf-8") as f:
+        unit = f.read()
+    with open(os.path.join(ROOT, "systemd", "jarngrip.service"), encoding="utf-8") as f:
+        driver = next(word for word in f.read().split() if word.endswith("jarngrip.py"))
+    assert driver.replace("jarngrip.py", "ayn_listen.py") in unit and "Restart=on-failure" in unit
+
+
+def test_stopping_the_screenshot_changes_only_the_ayn_mapping():
+    import ayn_button
+
+    changed = ayn_button.without_screenshot(THOR_PROFILE, ["xb360"])
+    assert 'name: "Default + JarnGrip"' in changed
+    assert "target_devices:\n- xb360\n- keyboard\nmapping:\n" in changed
+    assert "Screenshot" not in changed and changed.count("button: QuickAccess2") == 1
+    assert "keyboard: KeyF24" in changed
+    assert "button: LeftPaddle1" in changed and "keyboard: KeyVolumeUp" in changed  # the rest is kept
+    # Applied again (InputPlumber hands back its own version), it changes nothing more.
+    assert ayn_button.without_screenshot(changed, ["xb360", "keyboard"]) == changed
+    # A profile without the mapping gets it; one with target devices of its own gets ours instead.
+    bare = "version: 1\nkind: DeviceProfile\nname: 'Mine: custom'\ntarget_devices:\n- deck-uhid\nmapping: []\n"
+    out = ayn_button.without_screenshot(bare, ["deck-uhid"])
+    assert 'name: "Mine: custom + JarnGrip"' in out and out.count("target_devices:") == 1
+    assert "- deck-uhid\n- keyboard\n" in out and "keyboard: KeyF24" in out
+    for bad in ("", "version: 1\nkind: Something\nmapping: []\n", "version: 1\nkind: DeviceProfile\nname: x\n"):
+        try:
+            ayn_button.without_screenshot(bad, [])
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
+
+
+def test_the_ayn_device_is_looked_up_once_but_never_remembered_as_missing():
+    import ayn_button
+
+    tree = {"out": ""}  # InputPlumber not up yet
+    runs = []
+
+    class Done:
+        @property
+        def stdout(self):
+            return tree["out"]
+
+    real = ayn_button.subprocess.run, ayn_button._get, ayn_button._busctl
+    ayn_button.subprocess.run = lambda *args, **kwargs: runs.append(args) or Done()
+    ayn_button._get = lambda path, interface, prop: "AYN Thor"
+    ayn_button._known = []
+    try:
+        assert ayn_button._ayn_devices() == []
+        tree["out"] = "/org/shadowblip/InputPlumber\n/org/shadowblip/InputPlumber/CompositeDevice0\n"
+        dev = ("/org/shadowblip/InputPlumber/CompositeDevice0", "AYN Thor")
+        assert ayn_button._ayn_devices() == [dev] and ayn_button._ayn_devices() == [dev]
+        assert len(runs) == 2  # the empty answer was not kept; the found device was
+
+        def fail(*args):
+            raise ayn_button.BusError("The name is not activatable")
+
+        ayn_button._busctl = fail
+        ayn_button._get = lambda *args: fail()
+        with tempfile.TemporaryDirectory() as tmp:
+            assert ayn_button.sync(True, Path(tmp) / "state.json").startswith("Could not change")
+        assert ayn_button._known == []  # looked up again next time
+    finally:
+        ayn_button.subprocess.run, ayn_button._get, ayn_button._busctl = real
+        ayn_button._known = []
+
+
+def test_the_screenshot_setting_loads_the_change_and_puts_the_old_profile_back():
+    import ayn_button
+
+    dev = "/org/shadowblip/InputPlumber/CompositeDevice0"
+    ip = {"name": "Default", "path": "/usr/share/inputplumber/profiles/default.yaml", "yaml": THOR_PROFILE,
+          "targets": ["xb360"], "loads": []}
+
+    def busctl(*args):
+        if args[0] == "get-property":
+            prop = args[4]
+            if prop == "Name":
+                return "AYN Thor"
+            if prop == "ProfileName":
+                return ip["name"]
+            if prop == "ProfilePath":
+                return ip["path"]
+            if prop == "TargetDevices":
+                return [f"/target/{t}" for t in ip["targets"]]
+            if prop == "DeviceType":
+                return args[2].rsplit("/", 1)[1]
+        method = args[4]
+        if method == "GetProfileYaml":
+            return [ip["yaml"]]
+        if method == "LoadProfileFromYaml":
+            text = args[6]
+            ip["loads"].append("yaml")
+            ip["yaml"], ip["path"] = text, ""
+            ip["name"] = next(l[6:].strip().strip('"') for l in text.splitlines() if l.startswith("name:"))
+            if "- keyboard" in text and "keyboard" not in ip["targets"]:
+                ip["targets"].append("keyboard")
+            return None
+        if method == "LoadProfilePath":
+            ip["loads"].append(args[6])
+            ip["name"], ip["path"], ip["yaml"] = "Default", args[6], THOR_PROFILE
+            return None
+        raise AssertionError(args)
+
+    calls = []
+
+    def counted(*args):
+        calls.append(args)
+        return busctl(*args)
+
+    real = ayn_button._busctl, ayn_button._ayn_devices, ayn_button.os.path.isfile
+    ayn_button._busctl, ayn_button._ayn_devices = counted, lambda: [(dev, "AYN Thor")]
+    ayn_button.os.path.isfile = lambda path: True
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "inputplumber.json"
+            assert ayn_button.sync(False, state) == "" and ip["loads"] == []  # never on: InputPlumber is left alone
+            assert ayn_button.sync(True, state) == ""
+            assert ip["name"] == "Default + JarnGrip" and "keyboard" in ip["targets"] and state.exists()
+            calls.clear()
+            assert ayn_button.sync(True, state) == "" and ip["loads"] == ["yaml"]  # already done: not loaded again
+            assert len(calls) == 2  # the check every few seconds: the profile's name and the target devices
+            # InputPlumber restarted: its stock profile is back, and the keyboard is gone.
+            ip.update(name="Default", path="/usr/share/inputplumber/profiles/default.yaml", yaml=THOR_PROFILE,
+                      targets=["xb360"])
+            ayn_button.sync(True, state)
+            assert ip["loads"] == ["yaml", "yaml"] and ip["name"].endswith("+ JarnGrip")
+            assert ayn_button.sync(False, state) == ""
+            assert ip["loads"][-1] == "/usr/share/inputplumber/profiles/default.yaml" and ip["name"] == "Default"
+            assert not state.exists()
+
+            def refuse(*args):
+                if args[0] == "call" and args[4].startswith("Load"):
+                    raise ayn_button.BusError("Access denied")
+                return busctl(*args)
+
+            ayn_button._busctl = refuse
+            assert "Reinstall JarnGrip" in ayn_button.sync(True, state)
+    finally:
+        ayn_button._busctl, ayn_button._ayn_devices, ayn_button.os.path.isfile = real
+
+
+def test_the_ayn_button_toggles_the_pad_only_while_its_switch_is_on():
+    import asyncio
+    import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backend(tmp)
+        plugin = main.Plugin()
+        plugin._ignore_until = 0.0
+        calls = []
+
+        async def set_enabled(enabled):
+            calls.append(enabled)
+            return {"enabled": enabled}
+
+        plugin.set_enabled = set_enabled
+        active, main._active = main._active, lambda unit: False
+
+        def run(presses, queued=False):
+            """The listener's bytes, one per press. Queued: they arrived while a toggle was still under way."""
+            plugin._ignore_until = time.monotonic() + 60 if queued else 0.0
+            read, write = os.pipe()
+            os.set_blocking(read, False)
+            os.write(write, b"p" * presses)
+            os.close(write)
+            try:
+                asyncio.run(plugin._read_presses(read))  # a pipe ends when written; the backend's FIFO never does
+            finally:
+                os.close(read)
+
+        try:
+            run(1)
+            assert calls == []  # the switch is off by default
+            main._write({**main._read(), "ayn_button": True})
+            run(1)
+            assert calls == [True]
+            run(2)  # read together: one toggle, not on and straight off again
+            assert calls == [True, True]
+            run(1, queued=True)
+            assert calls == [True, True]
+        finally:
+            main._active = active
+
+
+def test_uninstalling_from_decky_puts_things_back_and_keeps_the_settings():
+    import asyncio
+    import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        call("save_config", {"theme": "dark"})
+        home = Path(tmp)
+        saved = {k: getattr(main, k) for k in ("APP", "UNIT_FILE", "LISTENER_FILE", "AYN_STATE", "AYN_FIFO", "MARKER",
+                                               "INSTALLED_MARKER", "_systemctl")}
+        main.INSTALLED_MARKER = home / "var-lib/installed"
+        main.LISTENER_FILE, main.AYN_FIFO = home / "systemd/jarngrip-ayn.service", home / "run/jarngrip-ayn"
+        main.APP, main.UNIT_FILE = home / "share/jarngrip", home / "systemd/jarngrip.service"
+        main.AYN_STATE, main.MARKER = home / "state/inputplumber.json", home / "state/restore.json"
+        (main.APP / "bin").mkdir(parents=True)
+        (main.APP / "bin/jarngrip.py").write_text("")
+        for path in (main.UNIT_FILE, main.LISTENER_FILE, main.APP_MENU, main.AUTOSTART, main.INSTALLED_MARKER, main.AYN_FIFO):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        main.MARKER.parent.mkdir(parents=True, exist_ok=True)
+        main.MARKER.write_text('{"bottom_screen": true, "ratatoskr": false}')
+        ran = []
+        main._systemctl = lambda action, unit=None: ran.append((action, unit)) or True
+        plugin = main.Plugin()
+        synced = []
+
+        async def sync(wanted=None):
+            synced.append(wanted)
+            return ""
+
+        plugin._sync_screenshot = sync
+        try:
+            asyncio.run(plugin._uninstall())
+            assert synced == [False]  # the AYN button gets its screenshot back
+            assert ("stop", "jarngrip.service") in ran and ("stop", "jarngrip-ayn.service") in ran
+            assert ("start", "armada-bottom-screen.service") in ran
+            assert ("start", "touch-master.service") not in ran and ran[-1] == ("daemon-reload", None)
+            assert not any(p.exists() for p in (main.APP, main.UNIT_FILE, main.LISTENER_FILE, main.APP_MENU, main.AUTOSTART,
+                                                main.MARKER, main.AYN_FIFO, main.INSTALLED_MARKER))
+            assert main.CFG.exists() and call("get_config")["theme"] == "dark"  # settings stay
+        finally:
+            for k, v in saved.items():
+                setattr(main, k, v)
+
+
+def test_the_polkit_rule_applies_only_to_profile_loading_by_armada_while_installed():
+    with open(os.path.join(ROOT, "polkit", "49-jarngrip-inputplumber.rules"), encoding="utf-8") as f:
+        rule = f.read()
+    actions = set(re.findall(r'"(org\.shadowblip\.[A-Za-z.]+)"', rule))
+    assert actions == {"org.shadowblip.Input.CompositeDevice.LoadProfileFromYaml",
+                       "org.shadowblip.Input.CompositeDevice.LoadProfilePath"}
+    # The marker it checks must be outside the home folder, which polkitd cannot look inside.
+    assert 'subject.user == "armada"' in rule and '"/var/lib/jarngrip/installed"' in rule and "/home/" not in rule
+    with open(os.path.join(ROOT, "scripts", "install-on-device.sh"), encoding="utf-8") as f:
+        script = f.read()
+        assert "polkit/49-jarngrip-inputplumber.rules" in script and "-o armada -g armada /dev/null /var/lib/jarngrip/installed" in script
+    with open(os.path.join(ROOT, "scripts", "uninstall-on-device.sh"), encoding="utf-8") as f:
+        script = f.read()
+        assert "rm -f /etc/polkit-1/rules.d/49-jarngrip-inputplumber.rules" in script and "rm -rf /var/lib/jarngrip" in script
 
 
 def test_desktop_mode_adds_and_removes_the_autostart_entry():

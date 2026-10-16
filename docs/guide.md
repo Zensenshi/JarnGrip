@@ -10,10 +10,13 @@
 
 ## The Decky panel
 
+- **Shortcut**: **Home + Start** opens or closes the pad from anywhere in Game Mode, mid-game included, without opening Decky. A toast says which. **Change shortcut** records the next button or buttons you press instead, such as the AYN button below the screen; **Back to Home + Start** undoes it. Turn the shortcut off here if a game needs that combination.
+- **AYN button**: the button below the screen opens or closes the pad too. Steam still takes a screenshot each time unless you also turn on **Stop the screenshot**. Until then, **Home + R1** opens and closes the pad as well, because that is what the AYN button sends when InputPlumber emulates a Steam Deck controller.
+- **Stop the screenshot**: the AYN button sends F24, a key nothing uses, instead of the screenshot. JarnGrip does this by loading InputPlumber's profile again with that one button changed; no file changes. It stays until you turn it off or uninstall JarnGrip: InputPlumber forgets it when it restarts, and JarnGrip applies it again each time it starts.
 - **Theme**, **haptics** strength, **burn-in protection**, a **24-hour clock**, and **Start with Desktop Mode**.
 - **Remap a control**: pick a control, a key and any of **With Ctrl / Shift / Alt**, then save. **Reset to default** puts it back.
 - **Profiles**: saved sets of remaps. Load one, save to it, save as a new profile, or delete one.
-- **Trackpad sensitivity**, and **Stop and restore screen services**.
+- **Trackpad sensitivity**, **Stop and restore screen services**, and **Uninstall JarnGrip**, which uses Decky's own uninstall: it stops the pad, gives the bottom screen and the AYN button back, and removes JarnGrip, keeping your settings and profiles.
 
 While the pad runs, it stops Ratatoskr or Armada's own bottom-screen service, and starts it again when you stop the pad. Don't run two bottom-screen drivers at once.
 
@@ -57,3 +60,6 @@ Everything is kept in `~/.config/jarngrip/config.json`, which the pad rereads wi
 | `burn_in`, `dim_after_s`, `dim_level` | on/off; seconds (60); 0.1 to 1 (0.4) | Burn-in protection, and when and how far the idle pad dims. |
 | `clock_24h` | `true` / `false` | A 24-hour clock. |
 | `desktop_mode` | `true` / `false` | Start the pad with the desktop in Desktop Mode. |
+| `ayn_button` | `true` / `false` | The AYN button below the screen opens and closes the pad, and Home + R1 while it still takes screenshots (off). |
+| `ayn_no_screenshot` | `true` / `false` | The AYN button sends F24 instead of taking a screenshot, while `ayn_button` is on (off). |
+| `shortcut`, `shortcut_buttons` | on/off; `[buttons, upper]` | The shortcut that opens and closes the pad in Game Mode (on), as Steam's two button bitmasks (Home + Start). Set it with **Change shortcut**. |

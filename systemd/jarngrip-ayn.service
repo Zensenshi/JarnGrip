@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[Unit]
+Description=JarnGrip - AYN button listener
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /var/home/armada/.local/share/jarngrip/bin/ayn_listen.py
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5

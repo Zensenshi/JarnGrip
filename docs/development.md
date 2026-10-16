@@ -9,14 +9,17 @@
 | Path | |
 |---|---|
 | `main.py`, `dist/index.js`, `plugin.json` | The Decky backend and panel. The backend runs as the `armada` user: `plugin.json` asks for no `root` flag, and a test keeps it that way. |
+| `ayn_button.py` | For the backend: "Stop the screenshot", which loads InputPlumber's profile again with the AYN button changed to F24 on its virtual keyboard. |
 | `driver/bin/jarngrip.py` | The pad's window, touchscreen reader and lifecycle, in Game Mode or (`--desktop`) Desktop Mode. |
 | `driver/bin/pad_model.py` | What is on the screen and what each touch does. No GTK or cairo. |
 | `driver/bin/pad_draw.py` | How it looks: themes and painting with cairo. |
 | `driver/bin/haptics.py`, `system_status.py`, `touch_device.py` | Vibration, the clock, battery and screens, and finding the touchscreen. |
 | `driver/bin/engine.py`, `touch_frames.py`, `burn_in.py`, `driver/debug_codes.py` | From Ratatoskr, under MIT. |
 | `driver/fonts/` | Cinzel and Nunito, Bold, under the SIL Open Font License. |
+| `driver/bin/ayn_listen.py`, `systemd/jarngrip-ayn.service` | The AYN button listener, a user service while "AYN button" is on. Decky runs the backend without the user's groups, so it cannot read `/dev/input`; the listener can, and writes a byte per press into a FIFO in `/run/user/1000` that the backend reads. |
 | `systemd/jarngrip.service` | The Game Mode service. |
 | `desktop/` | The Desktop Mode app-menu and autostart entries. |
+| `polkit/` | The rule that lets the `armada` user load InputPlumber profiles, for "Stop the screenshot". The installer puts it in `/etc/polkit-1/rules.d/` and the uninstaller removes it. |
 | `scripts/` | The install and uninstall scripts. |
 
 [NOTICE.md](../NOTICE.md) says which file came from where; [CHANGELOG.md](../CHANGELOG.md) what changed in each version.
