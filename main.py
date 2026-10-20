@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -54,6 +55,8 @@ AUTOSTART = HOME / ".config/autostart/jarngrip.desktop"
 # The AYN button below the screen (see ayn_button.py): looked for every few seconds, as InputPlumber's virtual devices
 # come and go, and the profile change that stops its screenshot, kept here so that turning it off can undo it.
 WATCH_RETRY_S = 5
+# Decky kills a plugin that has not stopped 5 seconds after asking; _unload gives up on its cleanup before then.
+UNLOAD_BUDGET_S = 3
 AYN_STATE = HOME / ".local/state/jarngrip/inputplumber.json"
 # The backend cannot read /dev/input: Decky runs it as the user but without the user's groups. A user service has them,
 # so jarngrip-ayn.service (driver/bin/ayn_listen.py) listens and writes a byte per press into this FIFO.
@@ -208,6 +211,31 @@ def _restore_paused() -> None:
             _systemctl("start", unit)
 
 
+async def _bg(fn, *args):
+    """Run blocking work (systemctl, busctl, copying files) on a daemon thread. The plugin's event loop also receives
+    Decky's requests, its stop request among them: it must never wait on such a call, or Decky kills the plugin after 5
+    seconds without its _unload having run. A daemon thread still running cannot keep the plugin from exiting either."""
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+
+    def settle(ok: bool, value) -> None:
+        if not done.done():
+            (done.set_result if ok else done.set_exception)(value)
+
+    def run() -> None:
+        try:
+            outcome = (True, fn(*args))
+        except BaseException as err:  # noqa: BLE001 - handed to the awaiting coroutine
+            outcome = (False, err)
+        try:
+            loop.call_soon_threadsafe(settle, *outcome)
+        except RuntimeError:
+            pass  # the loop has closed: Decky stopped the plugin meanwhile
+
+    threading.Thread(target=run, name=getattr(fn, "__name__", "jarngrip"), daemon=True).start()
+    return await done
+
+
 def _open_fifo(path: Path) -> int:
     """The FIFO the AYN button listener writes presses into, made if missing and opened for reading. Opened read-write,
     so that it always has a writer: with none, a FIFO reads as ended and would wake the reader over and over."""
@@ -234,16 +262,23 @@ class Plugin:
     _ayn_lock = None
 
     async def _main(self):
+        # Nothing here may wait: Decky's requests are served on this same loop. The slow part runs in _start.
+        self._fifo = _open_fifo(AYN_FIFO)
+        loop = asyncio.get_running_loop()
+        self._tasks = [loop.create_task(self._start()), loop.create_task(self._read_presses(self._fifo))]
+
+    async def _start(self):
+        await _bg(self._start_blocking)
+        await self._watch_ayn_button()
+
+    @staticmethod
+    def _start_blocking() -> None:
         changed = _install_runtime()
         # Apply updates to a running pad, but never auto-start after a Decky reload. A stale enabled flag must not
         # grab the digitizer during a Game Mode -> Desktop Mode transition (Ratatoskr issue #34).
-        if changed and _active(UNIT):
-            _systemctl("restart", UNIT)
-        if changed and _active(LISTENER):
-            _systemctl("restart", LISTENER)
-        self._fifo = _open_fifo(AYN_FIFO)
-        loop = asyncio.get_running_loop()
-        self._tasks = [loop.create_task(self._read_presses(self._fifo)), loop.create_task(self._watch_ayn_button())]
+        for unit in (UNIT, LISTENER):
+            if changed and _active(unit):
+                _systemctl("restart", unit)
 
     async def _unload(self):
         for task in getattr(self, "_tasks", []):
@@ -251,9 +286,13 @@ class Plugin:
         if getattr(self, "_fifo", -1) >= 0:
             os.close(self._fifo)
             self._fifo = -1
-        _systemctl("stop", LISTENER)
         # Only while JarnGrip runs: without it, a button that no longer takes screenshots would do nothing at all.
-        await self._sync_screenshot(False)
+        # Within Decky's 5 seconds, or none of it may happen.
+        try:
+            await asyncio.wait_for(asyncio.gather(_bg(_systemctl, "stop", LISTENER), self._sync_screenshot(False)),
+                                   UNLOAD_BUDGET_S)
+        except asyncio.TimeoutError:
+            _log(f"unload: cleanup did not finish within {UNLOAD_BUDGET_S} s", error=True)
 
     async def _uninstall(self):
         """Decky is removing the plugin (from its settings, or "Uninstall JarnGrip" in the panel): put back what JarnGrip
@@ -261,6 +300,10 @@ class Plugin:
         cannot go from here: the installer's backups and the polkit rule stay, but deleting the user's own marker makes
         the rule stop applying (see polkit/49-jarngrip-inputplumber.rules)."""
         await self._sync_screenshot(False)
+        await _bg(self._uninstall_blocking)
+
+    @staticmethod
+    def _uninstall_blocking() -> None:
         for unit in (UNIT, LISTENER):
             _systemctl("stop", unit)
         _restore_paused()
@@ -278,7 +321,7 @@ class Plugin:
         if self._ayn_lock is None:
             self._ayn_lock = asyncio.Lock()
         async with self._ayn_lock:
-            self._ayn_error = await asyncio.to_thread(ayn_button.sync, wanted, AYN_STATE)
+            self._ayn_error = await _bg(ayn_button.sync, wanted, AYN_STATE)
         return self._ayn_error
 
     async def _watch_ayn_button(self):
@@ -297,8 +340,8 @@ class Plugin:
 
     async def _watch_round(self):
         wanted = bool(_read().get("ayn_button"))
-        if wanted != await asyncio.to_thread(_active, LISTENER):
-            started = await asyncio.to_thread(_systemctl, "start" if wanted else "stop", LISTENER)
+        if wanted != await _bg(_active, LISTENER):
+            started = await _bg(_systemctl, "start" if wanted else "stop", LISTENER)
             _log(f"AYN button: listener {'started' if wanted else 'stopped'}" if started
                  else f"AYN button: could not {'start' if wanted else 'stop'} {LISTENER}", error=not started)
         before = self._ayn_error
@@ -323,7 +366,7 @@ class Plugin:
                 # Presses that queued up while the pad was starting or stopping are not a new request.
                 if time.monotonic() >= self._ignore_until and _read().get("ayn_button"):
                     _log("AYN button: pressed, toggling the pad")
-                    result = await self.set_enabled(not _active(UNIT))
+                    result = await self.set_enabled(not await _bg(_active, UNIT))
                     self._ignore_until = time.monotonic() + 0.5
                     if decky:
                         await decky.emit("jarngrip_toggled", result)
@@ -331,13 +374,19 @@ class Plugin:
             loop.remove_reader(fd)
 
     async def get_status(self):
-        return {"enabled": _active(UNIT), "profile": _read().get("active_profile", "Default"),
+        return {"enabled": await _bg(_active, UNIT), "profile": _read().get("active_profile", "Default"),
                 "ayn_error": self._ayn_error}
 
     async def get_config(self):
         return _read()
 
     async def set_enabled(self, enabled):
+        result = await _bg(self._set_enabled_blocking, enabled)
+        return result or await self.get_status()
+
+    @staticmethod
+    def _set_enabled_blocking(enabled) -> dict | None:
+        """Start or stop the pad, and the bottom-screen services it takes the place of. Returns an error, or None."""
         _install_runtime()
         if enabled:
             paused = {key: _active(unit) for key, unit in PAUSED_UNITS}
@@ -351,7 +400,7 @@ class Plugin:
             # A simple service counts as started the moment its process exists. Give the pad time to fail (no uinput,
             # no bottom display) before believing it, so a pad that dies at once does not leave the bottom screen dead.
             if started:
-                await asyncio.sleep(1.5)
+                time.sleep(1.5)
             if not started or not _active(UNIT):
                 _restore_paused()
                 return {"enabled": False, "error": "The pad did not start; the bottom screen was given back."}
@@ -360,7 +409,7 @@ class Plugin:
             if _active(UNIT):
                 return {"enabled": True, "error": "The pad did not stop; the bottom screen was left as it is."}
             _restore_paused()
-        return await self.get_status()
+        return None
 
     async def save_config(self, cfg):
         """Save the settings the Decky panel changes. Anything missing keeps its saved value; anything invalid is

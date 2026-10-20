@@ -1176,6 +1176,61 @@ def test_systemctl_goes_direct_and_never_runs_a_command_twice():
         main.subprocess.run, main._systemctl_form = real
 
 
+def test_the_backend_never_keeps_decky_waiting():
+    """Decky's requests, its stop request among them, are served on the plugin's event loop: blocking work (systemctl,
+    busctl, copying files) must run beside it. On the Thor, a stuck loop made Decky kill the plugin unloaded."""
+    import asyncio
+    import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backend(tmp)
+        names = ("_systemctl", "_active", "_install_runtime", "AYN_FIFO", "UNLOAD_BUDGET_S", "WATCH_RETRY_S", "MARKER")
+        saved = {k: getattr(main, k) for k in names}
+        slow = {"s": 0.6}
+
+        def systemctl(action, unit=None):
+            time.sleep(slow["s"])  # a slow or stuck systemctl
+            return True
+
+        main._systemctl, main._active = systemctl, lambda unit: False
+        main._install_runtime = lambda: time.sleep(slow["s"]) or False
+        main.AYN_FIFO, main.MARKER = Path(tmp) / "jarngrip-ayn", Path(tmp) / "restore.json"
+        main.UNLOAD_BUDGET_S, main.WATCH_RETRY_S = 0.3, 60
+
+        async def ticks_during(coro):
+            """How often the loop got to run something else (every 20 ms) while coro ran."""
+            count = 0
+
+            async def ticker():
+                nonlocal count
+                while True:
+                    await asyncio.sleep(0.02)
+                    count += 1
+
+            task = asyncio.ensure_future(ticker())
+            await coro
+            task.cancel()
+            return count
+
+        async def scenario():
+            plugin = main.Plugin()
+            plugin._sync_screenshot = lambda wanted=None: asyncio.sleep(0, "")
+            start = time.monotonic()
+            await plugin._main()
+            assert time.monotonic() - start < 0.1  # the slow start-up runs afterwards
+            assert await ticks_during(plugin.set_enabled(True)) >= 10  # opening the pad: the loop kept going
+            slow["s"] = 10  # stuck for good
+            start = time.monotonic()
+            await plugin._unload()
+            assert time.monotonic() - start < 1  # gave up within its budget, well inside Decky's 5 seconds
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            for k, v in saved.items():
+                setattr(main, k, v)
+
+
 def test_the_desktop_entries_start_the_same_driver_as_the_service():
     with open(os.path.join(ROOT, "systemd", "jarngrip.service"), encoding="utf-8") as f:
         driver = next(word for word in f.read().split() if word.endswith("jarngrip.py"))
