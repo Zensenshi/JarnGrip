@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- **Opening and closing the pad is faster.** The Decky backend now reaches the user's service manager directly instead of through `systemd-machined`, and no longer runs a call a second time when its answer was "no". Together these added 1 to 3.5 seconds each way.
+- The backend no longer holds up Decky while it waits on the system: service and InputPlumber calls run beside Decky's requests, start-up returns at once, and stopping gives up on its cleanup after 3 seconds rather than being killed by Decky.
+
 ## 0.7.0
 
 - **Open and close the pad in one press**, from anywhere in Game Mode, a game included, so the bottom screen can go back to another app and come back to the pad without opening Decky. A toast says which.
