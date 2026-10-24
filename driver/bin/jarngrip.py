@@ -154,7 +154,10 @@ class PadApp:
         self.pad = PadController(self.bridge, self.gesture, on_change=self._changed,
                                  on_close=lambda: GLib.idle_add(self._close_pad), haptic=self.haptics.pulse,
                                  on_theme=lambda theme: GLib.idle_add(self._save_theme, theme), later=self._later)
-        self.pad.set_page_by_title(str(load_config().get("page", "")))
+        # The game first: the page is looked up among its tabs.
+        cfg = load_config()
+        self.pad.apply_config(cfg)
+        self.pad.set_page_by_title(str(cfg.get("page", "")))
 
         self.window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.window.set_title("JarnGrip")

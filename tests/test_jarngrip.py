@@ -135,10 +135,11 @@ def test_the_top_touchscreen_is_never_picked_and_there_is_no_fallback():
 # ---------------------------------------------------------------------- layout
 
 def test_every_view_fits_the_screen_without_overlaps():
-    views = [("pad", p, False) for p in range(len(pad_model.PAGES))] + [
-        ("trackpad", 0, False), ("keyboard", 0, False), ("keyboard", 0, True), ("settings", 0, False)]
-    for view, page, symbols in views:
-        _, widgets = build_layout(view, page, symbols)
+    views = [("pad", p, False, game) for game in pad_model.GAMES.values() for p in range(len(game.pages))] + [
+        ("trackpad", 0, False, pad_model.WOW), ("keyboard", 0, False, pad_model.WOW),
+        ("keyboard", 0, True, pad_model.WOW), ("settings", 0, False, pad_model.WOW)]
+    for view, page, symbols, game in views:
+        _, widgets = build_layout(view, page, symbols, game)
         assert len({w.id for w in widgets}) == len(widgets), view
         for w in widgets:
             assert w.x >= 0 and w.y >= 0 and w.x + w.w <= pad_model.W and w.y + w.h <= pad_model.H, (view, w.id)
@@ -151,10 +152,11 @@ def test_every_view_fits_the_screen_without_overlaps():
 
 
 def test_a_page_with_more_than_eight_buttons_splits_into_two_columns():
-    def columns(page):
-        return len({w.x for w in build_layout("pad", page)[1] if w.kind == "page"})
+    def columns(page, game):
+        return len({w.x for w in build_layout("pad", page, game=game)[1] if w.kind == "page"})
 
-    assert [columns(p) for p in range(3)] == [2, 1, 2]
+    assert [columns(p, pad_model.WOW) for p in range(3)] == [2, 1, 2]
+    assert [columns(p, pad_model.FFXI) for p in range(3)] == [2, 2, 2]
 
 
 def test_number_keys_are_not_much_taller_than_wide_and_are_centered():
@@ -199,12 +201,14 @@ def test_every_button_sends_one_key_per_press():
     """One press, one action: what Blizzard allows input software to do. No button may send a sequence of keys."""
     modifiers = set(pad_model.MOD_CODES.values())
     pad, bridge, clock = make()
-    for page in range(len(pad_model.PAGES)):
-        tap(pad, clock, f"tab:{page}")
-        for widget_id in [w.id for w in pad.widgets if w.kind in ("page", "number")]:
-            tap(pad, clock, widget_id)
-            pressed = [code for kind, code, down in bridge.take() if kind == "key" and down and code not in modifiers]
-            assert len(pressed) == 1, (widget_id, pressed)
+    for game in pad_model.GAMES:
+        pad.apply_config({"game": game})
+        for page in range(len(pad.game.pages)):
+            tap(pad, clock, f"tab:{page}")
+            for widget_id in [w.id for w in pad.widgets if w.kind in ("page", "number")]:
+                tap(pad, clock, widget_id)
+                pressed = [code for kind, code, down in bridge.take() if kind == "key" and down and code not in modifiers]
+                assert len(pressed) == 1, (game, widget_id, pressed)
 
 
 def test_a_number_is_sent_when_the_finger_lifts():
@@ -230,9 +234,9 @@ def swipe(pad, clock, widget_id, dx, dy, steps=5):
 
 def test_swiping_a_number_up_adds_shift_down_adds_ctrl_and_left_cancels():
     pad, bridge, clock = make()
-    assert swipe(pad, clock, "number:slot_5", 10, -90) == "shift"
+    assert swipe(pad, clock, "number:slot_5", 10, -90) == "up"
     assert bridge.take() == [("key", SHIFT, True), ("key", 6, True), ("key", 6, False), ("key", SHIFT, False)]
-    assert swipe(pad, clock, "number:slot_5", -10, 90) == "ctrl"
+    assert swipe(pad, clock, "number:slot_5", -10, 90) == "down"
     assert bridge.take() == [("key", CTRL, True), ("key", 6, True), ("key", 6, False), ("key", CTRL, False)]
     assert swipe(pad, clock, "number:slot_5", -90, 10) == "cancel"
     assert bridge.take() == [] and not pad.lit(next(w for w in pad.widgets if w.id == "number:slot_5"))
@@ -240,6 +244,102 @@ def test_swiping_a_number_up_adds_shift_down_adds_ctrl_and_left_cancels():
     assert swipe(pad, clock, "number:slot_5", 30, 0) is None  # a wobble is not a swipe
     assert bridge.take() == [("key", 6, True), ("key", 6, False)] * 2
     assert not pad.swipes
+
+
+def test_in_ffxi_a_swipe_up_reaches_the_ctrl_macro_bar_and_down_the_alt_one():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "ffxi"})
+    assert pad.game.titles == ("Menus", "Target", "Utility")
+    assert swipe(pad, clock, "number:slot_3", 0, -90) == "up"
+    assert bridge.take() == [("key", CTRL, True), ("key", 4, True), ("key", 4, False), ("key", CTRL, False)]
+    assert swipe(pad, clock, "number:slot_10", 0, 90) == "down"
+    assert bridge.take() == [("key", ALT, True), ("key", 11, True), ("key", 11, False), ("key", ALT, False)]
+    swipe(pad, clock, "number:slot_3", 0, 0)
+    assert bridge.take() == [("key", 4, True), ("key", 4, False)]  # a tap is the bare number
+
+
+def test_ffxi_macro_set_buttons_send_one_keystroke_with_ctrl_held_first():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:2")
+    for held in (0.05, 2.0):  # a hold is still one change of macro set, not a key repeat
+        tid = down(pad, clock, "page:macro_set_up")
+        assert bridge.take() == [("key", CTRL, True), ("key", 103, True), ("key", 103, False), ("key", CTRL, False)]
+        assert clock.slept[-3:] == [pad_model.MOD_LEAD_S, pad_model.TAP_HOLD_S, pad_model.TAP_HOLD_S]
+        clock.now += held
+        pad.touch_up(tid, clock.now)
+        assert bridge.take() == [] and not pad.key_refs  # the lift sends nothing more
+
+
+def test_a_macro_set_tap_does_not_hold_up_the_touch_thread():
+    pending = []
+    pad, bridge, clock = make(later=lambda delay, job: pending.append((delay, job)))
+    pad.apply_config({"game": "ffxi"})
+    pad.page = 2
+    pad._relayout()
+    down(pad, clock, "page:macro_set_down")
+    assert bridge.take() == [("key", CTRL, True)] and not clock.slept
+    for delay, event in ((pad_model.MOD_LEAD_S, ("key", 108, True)), (pad_model.TAP_HOLD_S, ("key", 108, False)),
+                         (pad_model.TAP_HOLD_S, ("key", CTRL, False))):
+        (wait, job), = pending
+        pending.clear()
+        assert wait == delay
+        job()
+        assert bridge.take() == [event]
+    assert not pending
+
+
+def test_swiping_an_ffxi_party_target_right_presses_enter_after_it():
+    buzzes = []
+    pad, bridge, clock = make(haptic=buzzes.append)
+    pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:1")
+    bridge.take()
+    buzzes.clear()
+    assert swipe(pad, clock, "page:party_2", 90, 10) == "confirm"
+    assert bridge.take() == [("key", 61, True), ("key", 61, False), ("key", 28, True), ("key", 28, False)]
+    assert clock.slept[-2:] == [pad_model.CONFIRM_GAP_S, pad_model.TAP_HOLD_S]
+    assert buzzes == ["press", "tick"]
+    for dx, dy in ((0, 0), (-90, 0), (0, 90), (90, 120)):  # a tap, or any other way, is the target alone
+        assert swipe(pad, clock, "page:self", dx, dy) is None
+        assert bridge.take() == [("key", 59, True), ("key", 59, False)], (dx, dy)
+    assert swipe(pad, clock, "page:nearest_npc", 90, 0) is None  # only the party targets confirm
+    assert bridge.take() == [("key", 66, True), ("key", 66, False)]
+
+
+def test_a_target_swipe_sends_no_enter_if_its_button_goes_away():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:1")
+    tid = down(pad, clock, "page:party_1")
+    x, y = center(pad, "page:party_1")
+    pad.touch_move(tid, x + 90, y, clock.now)
+    bridge.take()
+    tap(pad, clock, "mode:trackpad")  # another finger changes the view
+    pad.touch_up(tid, clock.now)
+    assert ("key", 28, True) not in bridge.take() and not pad.swipes
+
+
+def test_wow_targets_ignore_a_swipe_right():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:1")
+    bridge.take()
+    assert swipe(pad, clock, "page:party_1", 90, 0) is None
+    assert bridge.take() == [("key", 60, True), ("key", 60, False)]
+
+
+def test_changing_the_game_lets_go_and_keeps_the_page_when_it_can():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    tid = down(pad, clock, "page:sheathe_weapons")  # held while the game changes
+    assert bridge.take() == [("key", 44, True)]
+    pad.apply_config({"game": "ffxi"})
+    assert bridge.take() == [("key", 44, False)] and pad.page == 2
+    assert "page:auto_run" in {w.id for w in pad.widgets} and "page:sheathe_weapons" not in {w.id for w in pad.widgets}
+    pad.touch_up(tid, clock.now)
+    assert bridge.take() == []
+    pad.apply_config({"game": "nonsense"})
+    assert pad.game is pad_model.WOW
 
 
 def test_a_swipe_decides_where_the_finger_lifts():
@@ -762,9 +862,18 @@ def test_the_decky_panel_lists_the_same_controls_and_default_keys():
     import re
 
     with open(os.path.join(ROOT, "dist", "index.js"), encoding="utf-8") as f:
-        listed = json.loads(re.sub(r"(\w+):", r'"\1":', re.search(r"const defaults=(\{.*?\});", f.read()).group(1)))
-    slots = [s for _, page in pad_model.PAGES for s in page] + list(pad_model.NUMBER_SLOTS)
-    assert listed == {s.id: s.key for s in slots}
+        js = f.read()
+    for game in pad_model.GAMES.values():
+        listed = json.loads(re.sub(r"(\w+):", r'"\1":', re.search(rf"const {game.id}Defaults=(\{{.*?\}});", js).group(1)))
+        slots = [s for _, page in game.pages for s in page] + list(pad_model.NUMBER_SLOTS)
+        assert listed == {s.id: s.key for s in slots}, game.id
+    swipes = dict(re.findall(r'(\w+):\{name:"[^"]+",short:"[^"]+",defaults:\w+,mods:\w+,swipes:\[("\w+","\w+")\]', js))
+    assert swipes == {g.id: f'"{g.swipes["up"][0]}","{g.swipes["down"][0]}"' for g in pad_model.GAMES.values()}
+
+    sys.path.insert(0, ROOT)
+    import main
+
+    assert main.GAMES == tuple(pad_model.GAMES)
 
 
 def test_the_decky_key_picker_names_every_default_key_and_knows_the_default_modifiers():
@@ -776,11 +885,12 @@ def test_the_decky_key_picker_names_every_default_key_and_knows_the_default_modi
     names = json.loads(re.search(r"const keyNames=(\[.*?\]);", js).group(1))
     codes = [code for code, _ in names]
     assert len(codes) == len(set(codes)) and all(0 < code < 248 for code in codes)
-    slots = [s for _, page in pad_model.PAGES for s in page] + list(pad_model.NUMBER_SLOTS)
-    assert {s.key for s in slots} <= set(codes)
-    mods = json.loads(re.sub(r"(\w+):", r'"\1":', re.search(r"const defaultMods=(\{.*?\});", js).group(1)))
     names_of = {code: name for name, _, code in pad_model.MODIFIERS}
-    assert mods == {s.id: [names_of[m] for m in s.mods] for s in slots if s.mods}
+    for game in pad_model.GAMES.values():
+        slots = [s for _, page in game.pages for s in page] + list(pad_model.NUMBER_SLOTS)
+        assert {s.key for s in slots} <= set(codes), game.id
+        mods = json.loads(re.sub(r"(\w+):", r'"\1":', re.search(rf"const {game.id}Mods=(\{{.*?\}});", js).group(1)))
+        assert mods == {s.id: [names_of[m] for m in s.mods] for s in slots if s.mods}, game.id
 
 
 # ---------------------------------------------------------------------- header status and burn-in
@@ -844,6 +954,26 @@ def test_the_backend_keeps_what_a_save_leaves_out_and_ignores_nonsense():
         assert (cfg["sensitivity"], cfg["theme"], cfg["haptics"], cfg["glass_blur"]) == (2.5, "dark", False, 5)
         assert cfg["bindings"] == {}
         assert call("save_config", {"background_image": "../../etc/passwd"})["config"]["background_image"] == ""
+
+
+def test_each_game_keeps_its_own_controls_and_profiles():
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        call("save_config", {"bindings": {"character": "shift+46"}})
+        call("save_profile", "Raid")
+        cfg = call("select_game", "ffxi")["config"]
+        assert (cfg["game"], cfg["bindings"], list(cfg["profiles"]), cfg["active_profile"]) == ("ffxi", {}, ["Default"], "Default")
+        call("save_config", {"bindings": {"slot_1": 3}})
+        call("save_profile", "Macros")
+        cfg = call("select_game", "wow")["config"]
+        assert cfg["bindings"] == {"character": "shift+46"} and cfg["active_profile"] == "Raid"
+        assert sorted(cfg["profiles"]) == ["Default", "Raid"]
+        cfg = call("select_game", "ffxi")["config"]
+        assert cfg["bindings"] == {"slot_1": 3} and cfg["active_profile"] == "Macros"
+        assert set(cfg["games"]) == {"wow"}  # the current game's are at the top, not also set aside
+        assert call("select_game", "ffxi")["config"] == cfg  # the same game again changes nothing
+        assert not call("select_game", "../x")["ok"]
+        assert call("save_config", {"game": "wow"})["config"]["game"] == "ffxi"  # only select_game changes it
 
 
 def test_the_shortcut_setting_defaults_on_and_saves():
@@ -1413,9 +1543,12 @@ def painter():
 def test_every_swipe_fan_stays_on_the_screen():
     pad_draw = painter()
     _, widgets = build_layout("pad", 0)
-    for w in (w for w in widgets if w.kind == "number"):
+    targets = [w for w in build_layout("pad", 1, game=pad_model.FFXI)[1] if w.kind == "page" and w.data.confirm]
+    assert len(targets) == 6
+    fans = [(w, s) for w in widgets if w.kind == "number" for s in pad_draw.FAN_DIRECTIONS if s != "confirm"]
+    for w, swipe in fans + [(w, "confirm") for w in targets]:
         cx, cy = w.x + w.w / 2, w.y + w.h / 2
-        for swipe, angle in pad_draw.FAN_DIRECTIONS.items():
+        for angle in (pad_draw.FAN_DIRECTIONS[swipe],):
             reach = pad_draw._fan_reach(cx, cy, angle)
             end_x, end_y = cx + reach * math.cos(angle), cy + reach * math.sin(angle)
             assert 0 <= end_x <= pad_model.W and 0 <= end_y <= pad_model.H, (w.id, swipe)
@@ -1463,6 +1596,21 @@ def test_every_view_paints():
         pad_draw.paint(Context(), pad)
         tap(pad, clock, key_id(pad, "?123"))
         pad_draw.paint(Context(), pad)
+
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "ffxi"})
+    for target, dy in (("tab:0", -90), ("tab:1", 90), ("tab:2", 0)):
+        tap(pad, clock, target)
+        tid = down(pad, clock, "number:slot_1")
+        x, y = center(pad, "number:slot_1")
+        pad.touch_move(tid, x, y + dy, clock.now)  # its Ctrl or Alt fan is painted
+        pad_draw.paint(Context(), pad)
+        pad.touch_up(tid, clock.now)
+    tap(pad, clock, "tab:1")
+    tid = down(pad, clock, "page:party_5")
+    x, y = center(pad, "page:party_5")
+    pad.touch_move(tid, x + 90, y, clock.now)  # its Enter fan is painted
+    pad_draw.paint(Context(), pad)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,10 @@
 No GTK, cairo or uinput in here, so it runs and is tested anywhere. The layout and the input rules follow the
 second-screen pad of AYN-Thor-WoW-Launcher (https://github.com/wyattabuntjer/AYN-Thor-WoW-Launcher):
 
-- A page button is a real key: finger down presses it, finger up releases it, and several can be held at once.
-- A number button sends its key when the finger lifts, which lets a swipe change it: up adds Shift, down adds Ctrl,
-  and left cancels it.
+- A page button is a real key: finger down presses it, finger up releases it, and several can be held at once. A few
+  of FFXI's send one keystroke per touch instead (the macro sets), and its party targets press Enter after a swipe right.
+- A number button sends its key when the finger lifts, which lets a swipe change it: up and down add the game's two
+  modifiers (Shift and Ctrl for WoW, Ctrl and Alt for FFXI's two macro bars), and left cancels it.
 - The trackpad's click buttons hold while pressed, so they drag; a double tap keeps one held until it is tapped again.
 - The trackpad view's Shift, Ctrl and Alt are armed by a tap (they let go after the next click), locked by a double
   tap, and cleared by a tap.
@@ -23,6 +24,7 @@ from engine import BTN_LEFT, BTN_RIGHT, HI_RES_NOTCH, SCREEN_HEIGHT, SCREEN_WIDT
 W, H = SCREEN_WIDTH, SCREEN_HEIGHT
 
 KEY_LEFTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT = 42, 29, 56
+KEY_ENTER = 28
 MODIFIERS = (("shift", "Shift", KEY_LEFTSHIFT), ("ctrl", "Ctrl", KEY_LEFTCTRL), ("alt", "Alt", KEY_LEFTALT))
 MOD_CODES = {name: code for name, _, code in MODIFIERS}
 
@@ -35,7 +37,13 @@ BUTTON_STALE_S = STALE_CONTACT_S * 3
 FLASH_S = 0.12              # a tapped button stays lit this long, so a quick tap is still seen
 STRIP_PX_PER_NOTCH = 40.0   # finger travel on the scroll strip per wheel notch
 SWIPE_PX = 50.0             # finger travel on a number button that makes a press a swipe (about 3 mm)
-SWIPE_MODS = {"shift": (KEY_LEFTSHIFT,), "ctrl": (KEY_LEFTCTRL,)}
+# A one-keystroke button (Slot.tap) holds its modifiers this long before the key, then the key this long, then lets the
+# modifiers go after as long again. FFXI reads the keyboard once a frame: a Ctrl and an Up that land in the same frame
+# are the camera's Up, not a change of macro set. Emulated on the Thor, its frames run long and uneven, so 0.1 s of Ctrl
+# before the Up still lost most taps; these leave several slow frames between each step.
+MOD_LEAD_S = 0.3
+TAP_HOLD_S = 0.15
+CONFIRM_GAP_S = 0.1         # after a target button lets go, the wait before its swipe's Enter (Slot.confirm)
 
 # Layout, in bottom-screen pixels.
 MARGIN = 16.0
@@ -67,14 +75,29 @@ class Slot:
     label: str
     key: int
     mods: tuple = ()
+    tap: bool = False       # one keystroke per touch, modifiers first, however long the finger stays: no key repeat
+    confirm: bool = False   # a swipe right presses Enter after it: FFXI's party targets, to pick one for a <stpt> spell
 
 
-def _page(label: str, key: int, *mods: int) -> Slot:
-    return Slot(re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_"), label, key, mods)
+def _page(label: str, key: int, *mods: int, tap: bool = False, confirm: bool = False) -> Slot:
+    return Slot(re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_"), label, key, mods, tap, confirm)
+
+
+@dataclass(frozen=True)
+class Game:
+    """A game the pad is laid out for: its page tabs and what a swipe up or down on a number adds."""
+    id: str
+    name: str
+    pages: tuple    # (title, (Slot, ...)) per page tab
+    swipes: dict    # "up" / "down" -> (label, modifier key codes)
+
+    @property
+    def titles(self) -> tuple:
+        return tuple(title for title, _ in self.pages)
 
 
 # WoW's default bindings, as Linux key codes.
-PAGES = (
+WOW_PAGES = (
     ("Interface", (
         _page("Character", 46), _page("Spellbook", 25), _page("Talents", 49), _page("Quest Log", 38),
         _page("Map", 50), _page("Social", 24), _page("Guild", 36), _page("Group Finder", 23),
@@ -90,9 +113,38 @@ PAGES = (
         _page("Chat page up", 104), _page("Chat page down", 109), _page("Screenshot", 99),
     )),
 )
-PAGE_TITLES = tuple(title for title, _ in PAGES)
 
-# Action bar 1, slots 1 to 12.
+# FFXI's default keyboard controls (full keyboard layout): the menus open with Ctrl (or Alt) and a letter, F1 to F6 pick
+# party members, F8 and F9 the nearest NPC or player, and Ctrl (or Alt) with Up or Down changes the macro set. A
+# spell cast on <stpt> asks for a party member and then Enter: a swipe right on a party target sends both.
+FFXI_PAGES = (
+    ("Menus", (
+        _page("Main menu", 12), _page("Confirm", 28), _page("Cancel", 1), _page("Equipment", 18, KEY_LEFTCTRL),
+        _page("Items", 23, KEY_LEFTCTRL), _page("Magic", 50, KEY_LEFTCTRL), _page("Job abilities", 36, KEY_LEFTCTRL),
+        _page("Weapon skills", 17, KEY_LEFTCTRL), _page("Pet commands", 48, KEY_LEFTCTRL),
+    )),
+    ("Target", (
+        _page("Self", 59, confirm=True), _page("Party 1", 60, confirm=True), _page("Party 2", 61, confirm=True),
+        _page("Party 3", 62, confirm=True), _page("Party 4", 63, confirm=True), _page("Party 5", 64, confirm=True),
+        _page("Nearest NPC", 66), _page("Nearest player", 67), _page("Lock target", 55),
+        _page("Attack", 30, KEY_LEFTCTRL), _page("Check", 46, KEY_LEFTCTRL), _page("Ranged attack", 32, KEY_LEFTCTRL),
+    )),
+    ("Utility", (
+        _page("Auto-run", 71), _page("Rest", 35, KEY_LEFTCTRL), _page("Point of view", 47, KEY_LEFTCTRL),
+        _page("Macro set up", 103, KEY_LEFTCTRL, tap=True), _page("Macro set down", 108, KEY_LEFTCTRL, tap=True),
+        _page("Reply to tell", 19, KEY_LEFTCTRL), _page("Party chat", 25, KEY_LEFTCTRL),
+        _page("Linkshell chat", 38, KEY_LEFTCTRL), _page("Say", 31, KEY_LEFTCTRL),
+    )),
+)
+
+WOW = Game("wow", "World of Warcraft", WOW_PAGES,
+           {"up": ("Shift", (KEY_LEFTSHIFT,)), "down": ("Ctrl", (KEY_LEFTCTRL,))})
+# FFXI's macro palette: Ctrl + 1 to 0 is its upper bar, Alt + 1 to 0 the lower one.
+FFXI = Game("ffxi", "Final Fantasy XI", FFXI_PAGES,
+            {"up": ("Ctrl", (KEY_LEFTCTRL,)), "down": ("Alt", (KEY_LEFTALT,))})
+GAMES = {game.id: game for game in (WOW, FFXI)}
+
+# The number row: WoW's action bar 1, slots 1 to 12, or FFXI's macro palette with a swipe.
 NUMBER_SLOTS = tuple(
     Slot(f"slot_{i + 1}", label, code)
     for i, (label, code) in enumerate(zip(("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="), range(2, 14)))
@@ -190,7 +242,7 @@ def _modifier_row(widgets: list, x: float, y: float, w: float, h: float) -> None
          lambda m, bx, by, bw, bh: Widget(f"mod:{m[0]}", "mod", bx, by, bw, bh, m[1], data=m[2], size=MOD_TEXT))
 
 
-def build_layout(view: str, page: int, symbols: bool = False) -> tuple:
+def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) -> tuple:
     """(panels, widgets) for a view. Panels are (x, y, w, h, strong): the faint gold backing behind a group."""
     panels: list = []
     widgets: list = []
@@ -202,7 +254,7 @@ def build_layout(view: str, page: int, symbols: bool = False) -> tuple:
     modes_w = len(MODES) * MODE_W + (len(MODES) - 1) * GAP
     status_x = W - MARGIN - PANEL_PAD - modes_w - GAP - STATUS_W
     widgets.append(Widget("status", "status", status_x, hy, STATUS_W, hh))
-    _row(widgets, list(enumerate(PAGE_TITLES)), hx, hy, status_x - GAP - hx, hh,
+    _row(widgets, list(enumerate(game.titles)), hx, hy, status_x - GAP - hx, hh,
          lambda t, bx, by, bw, bh: Widget(f"tab:{t[0]}", "tab", bx, by, bw, bh, t[1], data=t[0], size=TAB_TEXT))
     _row(widgets, list(MODES), W - MARGIN - PANEL_PAD - modes_w, hy, modes_w, hh,
          lambda m, bx, by, bw, bh: Widget(f"mode:{m}", "mode", bx, by, bw, bh, data=m))
@@ -240,7 +292,7 @@ def build_layout(view: str, page: int, symbols: bool = False) -> tuple:
              full_w - 400, 128, lambda b, bx, by, bw, bh: Widget(b[0], b[0], bx, by, bw, bh, b[1], size=MOUSE_TEXT))
     else:
         half_w = (full_w - GAP) / 2
-        slots = PAGES[page][1]
+        slots = game.pages[page][1]
         split = len(slots) > SINGLE_COLUMN_MAX
         columns = [slots[: (len(slots) + 1) // 2], slots[(len(slots) + 1) // 2:]] if split else [slots]
         col_w = (half_w - (len(columns) - 1) * GAP) / len(columns)
@@ -252,8 +304,8 @@ def build_layout(view: str, page: int, symbols: bool = False) -> tuple:
                 widgets.append(Widget(f"page:{slot.id}", "page", px + PANEL_PAD, BODY_Y + PANEL_PAD + ri * (bh + GAP),
                                       col_w - 2 * PANEL_PAD, bh, slot.label, data=slot,
                                       size=PAGE_SPLIT_TEXT if split else PAGE_TEXT, wrap=split))
-        # Right half: the number block, centered top to bottom. Swipes give it Shift and Ctrl, so it needs no modifier
-        # row.
+        # Right half: the number block, centered top to bottom. Swipes give it the game's modifiers, so it needs no
+        # modifier row.
         rx = MARGIN + half_w + GAP
         key_w = (half_w - 2 * PANEL_PAD - 2 * GAP) / 3
         row_h = min((BODY_H - 2 * PANEL_PAD - 3 * GAP) / 4, key_w * NUMBER_TALL)
@@ -268,13 +320,19 @@ def build_layout(view: str, page: int, symbols: bool = False) -> tuple:
 
 
 def swipe_of(dx: float, dy: float) -> str | None:
-    """What a finger's travel on a number button asks for: "shift" (up), "ctrl" (down), "cancel" (left), or None for a
-    plain press. Right counts as a plain press: there is no room for a fan right of the right-hand column."""
+    """What a finger's travel on a number button asks for: "up" or "down" (the game's two modifiers), "cancel" (left),
+    or None for a plain press. Right counts as a plain press: there is no room for a fan right of the right-hand
+    column."""
     if max(abs(dx), abs(dy)) <= SWIPE_PX:
         return None
     if abs(dy) >= abs(dx):
-        return "shift" if dy < 0 else "ctrl"
+        return "up" if dy < 0 else "down"
     return "cancel" if dx < 0 else None
+
+
+def confirms(dx: float, dy: float) -> bool:
+    """Whether a finger's travel on a target button (Slot.confirm) is a swipe right, which adds an Enter."""
+    return dx > SWIPE_PX and dx >= abs(dy)
 
 
 @dataclass
@@ -284,7 +342,7 @@ class Touch:
     x: float
     y: float
     release: Callable | None = None  # what lifting the finger, or the button going away, lets go of
-    commit: Callable | None = None   # what lifting the finger sends (a number button); dropped if the button goes away
+    commit: Callable | None = None   # what lifting the finger sends (a number, a target's Enter); dropped if the button goes away
     start_x: float = 0.0
     start_y: float = 0.0
 
@@ -315,6 +373,7 @@ class PadController:
         self._later = later or (lambda delay, job: (self._sleep(delay), job()))
 
         self.view = "pad"   # pad, trackpad, keyboard, settings
+        self.game = WOW
         self.page = 0
         self.kb_symbols = False
         self.kb_shift = "off"   # off, on (next key only), caps
@@ -334,7 +393,8 @@ class PadController:
         self.mouse = {BTN_LEFT: MouseButton(), BTN_RIGHT: MouseButton()}
         self.strip_rest = 0.0
         self.last_touch: tuple | None = None    # (x, y, widget id) of the newest touch, for the settings view
-        self.swipes: dict = {}          # number widget id -> "shift", "ctrl" or "cancel" while a finger swipes on it
+        # widget id -> "up", "down" or "cancel" while a finger swipes on a number, "confirm" on a target button
+        self.swipes: dict = {}
         self.status_info: tuple | None = None   # (clock text, battery percent or None, charging) for the header
         # Burn-in protection, set by the app before each paint: how far everything is shifted, how bright it is,
         # and how visible the trackpad hints still are.
@@ -349,6 +409,13 @@ class PadController:
     # ------------------------------------------------------------------ configuration
 
     def apply_config(self, cfg: dict) -> None:
+        game = GAMES.get(cfg.get("game"), WOW)
+        if game is not self.game:
+            # Its buttons are about to change: let go of what they hold.
+            self._release_touches()
+            self.game = game
+            self.page = min(self.page, len(game.pages) - 1)
+            self._relayout()
         bindings = cfg.get("bindings")
         self.bindings = dict(bindings) if isinstance(bindings, dict) else {}
         self.tap_to_click = bool(cfg.get("tap_to_click", True))
@@ -367,8 +434,8 @@ class PadController:
         self._sync_tap_clicks()
 
     def set_page_by_title(self, title: str) -> None:
-        if title in PAGE_TITLES:
-            self.page = PAGE_TITLES.index(title)
+        if title in self.game.titles:
+            self.page = self.game.titles.index(title)
             self._relayout()
 
     # ------------------------------------------------------------------ what the painter asks
@@ -456,6 +523,34 @@ class PadController:
 
         return lambda: self._after_min(pressed_at, up)
 
+    def _tap(self, key: int, mods: tuple = ()) -> None:
+        """Send one keystroke whatever the finger does next: the modifiers, MOD_LEAD_S later the key for TAP_HOLD_S,
+        and the modifiers let go TAP_HOLD_S after that. The touch thread never waits for it."""
+        def mods_up() -> None:
+            for code in reversed(mods):
+                self._release(code)
+
+        def key_up() -> None:
+            self._release(key)
+            if mods:
+                self._later(TAP_HOLD_S, mods_up)
+
+        def key_down() -> None:
+            self._press(key)
+            self._later(TAP_HOLD_S, key_up)
+
+        for code in mods:
+            self._press(code)
+        if mods:
+            self._later(MOD_LEAD_S, key_down)
+        else:
+            key_down()
+
+    def _commit_target(self, widget: Widget, touch: Touch) -> None:
+        """A target button's finger lifted, after its key let go: a swipe right confirms the target with Enter."""
+        if confirms(touch.x - touch.start_x, touch.y - touch.start_y):
+            self._later(CONFIRM_GAP_S, lambda: self._tap(KEY_ENTER))
+
     def _mouse_down(self, code: int) -> Callable | None:
         button = self.mouse[code]
         now = self._clock()
@@ -488,7 +583,7 @@ class PadController:
         if swipe == "cancel":
             self.flash_until.pop(widget.id, None)  # nothing was sent: do not light it up
             return
-        self._press_slot(widget.data, SWIPE_MODS.get(swipe, ()))()
+        self._press_slot(widget.data, self.game.swipes[swipe][1] if swipe else ())()
 
     def unstick(self) -> None:
         """Make the game let go of Shift, Ctrl and Alt. A game can miss a key-up, for instance when Steam's overlay
@@ -530,7 +625,7 @@ class PadController:
     # ------------------------------------------------------------------ views
 
     def _relayout(self) -> None:
-        self.panels, self.widgets = build_layout(self.view, self.page, self.kb_symbols)
+        self.panels, self.widgets = build_layout(self.view, self.page, self.kb_symbols, self.game)
 
     def _set_view(self, view: str, page: int | None = None) -> None:
         """Show a view. Everything a finger was holding is let go first: its button is about to disappear."""
@@ -607,8 +702,12 @@ class PadController:
                         self._end_touch(other_tid, inside=False)
                         self._expired.add(other_tid)
             self.pressed.add(widget.id)
-            if kind == "page":
+            if kind == "page" and widget.data.tap:
+                self._tap(*combo_for(widget.data, self.bindings))
+            elif kind == "page":
                 touch.release = self._press_slot(widget.data)
+                if widget.data.confirm:
+                    touch.commit = lambda: self._commit_target(widget, touch)
             elif kind == "number":
                 touch.commit = lambda: self._commit_number(widget, touch)
             elif kind == "mod":
@@ -648,6 +747,15 @@ class PadController:
                     self.swipes.pop(touch.widget.id, None)
                 self.haptic("tick")
                 self.on_change()
+        elif touch.widget.kind == "page" and touch.widget.data.confirm:
+            confirm = confirms(x - touch.start_x, y - touch.start_y)
+            if confirm != (touch.widget.id in self.swipes):
+                if confirm:
+                    self.swipes[touch.widget.id] = "confirm"
+                else:
+                    self.swipes.pop(touch.widget.id, None)
+                self.haptic("tick")
+                self.on_change()
         elif touch.widget.kind == "strip":
             # Sliding down scrolls down, which is a negative wheel value.
             self.strip_rest -= dy * HI_RES_NOTCH / STRIP_PX_PER_NOTCH
@@ -671,10 +779,11 @@ class PadController:
         self.pressed.discard(widget.id)
         self.swipes.pop(widget.id, None)
         self.flash_until[widget.id] = self._clock() + FLASH_S
-        if touch.commit:
-            touch.commit()
+        # The key a finger held lets go before what its lift sends: a target's Enter comes after its own key.
         if touch.release:
             touch.release()
+        if touch.commit:
+            touch.commit()
         if widget.kind in ("close", "unstick") and inside and widget.contains(touch.x, touch.y, GAP / 2):
             if widget.kind == "close":
                 self.on_close()

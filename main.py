@@ -47,6 +47,10 @@ UNIT_FILE = HOME / ".config/systemd/user" / UNIT
 LISTENER_FILE = UNIT_FILE.parent / "jarngrip-ayn.service"
 PAUSED_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada-bottom-screen.service"))
 THEMES = ("classic", "charcoal", "dark", "glass")
+# The games the pad has a layout for (pad_model.GAMES). Each keeps its own remapped controls and profiles: the current
+# game's are at the top of the config, the others' set aside under "games".
+GAMES = ("wow", "ffxi")
+PER_GAME = ("bindings", "profiles", "active_profile")
 BACKGROUNDS = HOME / "Pictures/JarnGrip"
 PICTURE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
 # Desktop Mode: the pad in the KDE app menu, and started with the desktop when "Start with Desktop Mode" is on.
@@ -70,6 +74,7 @@ DEFAULT = {
     "shortcut": True, "shortcut_buttons": [1 << 13 | 1 << 14, 0], "ayn_button": False,
     "ayn_no_screenshot": False,
     "bindings": {}, "profiles": {"Default": {"bindings": {}}}, "active_profile": "Default",
+    "game": "wow", "games": {},
 }
 
 
@@ -136,6 +141,10 @@ def _read() -> dict:
         cfg["bindings"] = {}
     if not isinstance(cfg.get("profiles"), dict) or not cfg["profiles"]:
         cfg["profiles"] = json.loads(json.dumps(DEFAULT["profiles"]))
+    if cfg.get("game") not in GAMES:
+        cfg["game"] = DEFAULT["game"]
+    if not isinstance(cfg.get("games"), dict):
+        cfg["games"] = {}
     return cfg
 
 
@@ -492,6 +501,21 @@ class Plugin:
     async def list_backgrounds(self):
         _mkdir(BACKGROUNDS)
         return {"folder": str(BACKGROUNDS), "pictures": _backgrounds()}
+
+    async def select_game(self, game):
+        """Lay the pad out for another game. The current game's controls and profiles are set aside, and the other
+        game's brought back: a fresh Default profile the first time."""
+        if game not in GAMES:
+            return {"ok": False, "error": "unknown game"}
+        cfg = _read()
+        if game != cfg["game"]:
+            cfg["games"][cfg["game"]] = {key: cfg[key] for key in PER_GAME}
+            saved = cfg["games"].pop(game, None)
+            saved = saved if isinstance(saved, dict) else {}
+            cfg.update({key: json.loads(json.dumps(saved.get(key, DEFAULT[key]))) for key in PER_GAME})
+            cfg["game"] = game
+            _write(cfg)
+        return {"ok": True, "config": _read()}
 
     async def select_profile(self, name):
         cfg = _read()

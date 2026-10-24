@@ -423,7 +423,7 @@ FAN_REACH = 230.0               # how far the fan reaches past the finger
 FAN_ROUND = 30.0                # the radius of its rounded outer corners
 FAN_TIP = 22.0                  # the radius of its round tip, under the finger
 FAN_LABEL_PAD = 40.0            # room between the lettering and the fan's sides
-FAN_DIRECTIONS = {"shift": -math.pi / 2, "ctrl": math.pi / 2, "cancel": math.pi}  # up, down, left
+FAN_DIRECTIONS = {"up": -math.pi / 2, "down": math.pi / 2, "cancel": math.pi, "confirm": 0.0}  # confirm: a target
 FAN_MIN_TEXT = 22.0             # the smallest lettering a fan shrinks to where the screen ends
 FAN_SIDE_EXTRA = 60.0           # a sideways fan's extra length, for lettering that runs along it
 FAN_CLEAR = 100.0               # a fan's lettering starts at least this far out: the swiping finger is closer in
@@ -432,7 +432,7 @@ FAN_FADE = 0.55                 # a fan is solid from this far out, in key sizes
 
 def _fan_reach(cx: float, cy: float, angle: float) -> float:
     """How far a fan from (cx, cy) may reach in its direction before the screen ends."""
-    dx, dy = round(math.cos(angle)), round(math.sin(angle))  # the directions are straight up, down or left
+    dx, dy = round(math.cos(angle)), round(math.sin(angle))  # the directions are straight up, down, left or right
     room = {(0, -1): cy, (0, 1): H - cy, (-1, 0): cx, (1, 0): W - cx}[(dx, dy)]
     return room - MARGIN / 2
 
@@ -487,12 +487,11 @@ def _shape(cr, t: Theme, path, inset_path, fill, cancel: bool) -> None:
         cr.stroke()
 
 
-def _swipe_fan(cr, t: Theme, w: Widget, swipe: str) -> None:
-    """What lifting the finger will send from a swiped number: a rounded fan opening from the button in the swipe's
-    direction, with the modifier written large in it. Where the screen ends first (Ctrl on the bottom row), the fan is
-    shorter and its lettering smaller, but it stays whole and on the screen."""
+def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
+    """What lifting the finger will send from a swiped number (or a target's Enter): a rounded fan opening from the
+    button in the swipe's direction, with the modifier (label) written large in it. Where the screen ends first (down,
+    on the bottom row), the fan is shorter and its lettering smaller, but it stays whole and on the screen."""
     cancel = swipe == "cancel"
-    label = {"shift": "Shift", "ctrl": "Ctrl", "cancel": "Cancel"}[swipe]
     color = t.danger_text if cancel else t.text_pressed
     top, bottom = t.danger if cancel else t.pressed
     cx, cy = w.x + w.w / 2, w.y + w.h / 2
@@ -638,7 +637,8 @@ def _swipe_guide(cr, t: Theme, pad: PadController) -> None:
     y = BODY_Y + room / 2
     color = tuple(c * 0.6 * pad.hint_alpha + b * (1 - 0.6 * pad.hint_alpha) for c, b in zip(t.text, t.background))
     # The arrows are drawn, not typed: the bundled fonts have no arrow characters.
-    for w, word, arrow, side in zip(numbers[:3], ("Cancel", "Shift", "Ctrl"), ("left", "up", "down"), (-1, -1, -1)):
+    words = ("Cancel", pad.game.swipes["up"][0], pad.game.swipes["down"][0])
+    for w, word, arrow, side in zip(numbers[:3], words, ("left", "up", "down"), (-1, -1, -1)):
         cx = w.x + w.w / 2
         _text(cr, t, cx - side * 14, y, [word], 24, t.text, w.w - 50, alpha=0.6 * pad.hint_alpha)
         half = cr.text_extents(word).width / 2
@@ -700,4 +700,7 @@ def _paint_pad(cr, t: Theme, pad: PadController) -> None:
         if widget.kind == "key" and widget.data.action == "input" and pad.lit(widget):
             _preview(cr, t, widget, pad.key_typed.get(widget.id) or pad.key_label(widget.data))
         elif widget.kind == "number" and widget.id in pad.swipes:
-            _swipe_fan(cr, t, widget, pad.swipes[widget.id])
+            swipe = pad.swipes[widget.id]
+            _swipe_fan(cr, t, widget, swipe, "Cancel" if swipe == "cancel" else pad.game.swipes[swipe][0])
+        elif widget.kind == "page" and widget.id in pad.swipes:
+            _swipe_fan(cr, t, widget, "confirm", "Enter")

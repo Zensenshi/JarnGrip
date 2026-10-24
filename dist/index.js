@@ -4,11 +4,20 @@ const init=window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_decky
 if(!init)throw new Error("Decky Loader API unavailable");
 let api;try{api=init.connect(2,manifest.name)}catch{api=init.connect(1,manifest.name)}
 const call=api.call, jsx=SP_JSX.jsx, jsxs=SP_JSX.jsxs;
-// Control ids and their default Linux key codes, as in driver/bin/pad_model.py.
-const defaults={character:46,spellbook:25,talents:49,quest_log:38,map:50,social:24,guild:36,group_finder:23,achievements:21,professions:37,bags:48,system:1,self:59,party_1:60,party_2:61,party_3:62,party_4:63,next_enemy:15,previous_enemy:15,sheathe_weapons:44,auto_run:69,walk_run:98,sit_stand:45,hide_ui:44,enemy_nameplates:47,friendly_nameplates:47,chat_page_up:104,chat_page_down:109,screenshot:99,slot_1:2,slot_2:3,slot_3:4,slot_4:5,slot_5:6,slot_6:7,slot_7:8,slot_8:9,slot_9:10,slot_10:11,slot_11:12,slot_12:13};
-// The controls that send a modifier with their key by default.
-const defaultMods={previous_enemy:["shift"],hide_ui:["alt"],friendly_nameplates:["shift"]};
-const controlOptions=Object.keys(defaults).map(x=>({data:x,label:x.replaceAll("_"," ")}));
+// Each game's control ids and their default Linux key codes, and the controls that send a modifier with their key by
+// default, as in driver/bin/pad_model.py.
+const wowDefaults={character:46,spellbook:25,talents:49,quest_log:38,map:50,social:24,guild:36,group_finder:23,achievements:21,professions:37,bags:48,system:1,self:59,party_1:60,party_2:61,party_3:62,party_4:63,next_enemy:15,previous_enemy:15,sheathe_weapons:44,auto_run:69,walk_run:98,sit_stand:45,hide_ui:44,enemy_nameplates:47,friendly_nameplates:47,chat_page_up:104,chat_page_down:109,screenshot:99,slot_1:2,slot_2:3,slot_3:4,slot_4:5,slot_5:6,slot_6:7,slot_7:8,slot_8:9,slot_9:10,slot_10:11,slot_11:12,slot_12:13};
+const wowMods={previous_enemy:["shift"],hide_ui:["alt"],friendly_nameplates:["shift"]};
+const ffxiDefaults={main_menu:12,confirm:28,cancel:1,equipment:18,items:23,magic:50,job_abilities:36,weapon_skills:17,pet_commands:48,self:59,party_1:60,party_2:61,party_3:62,party_4:63,party_5:64,nearest_npc:66,nearest_player:67,lock_target:55,attack:30,check:46,ranged_attack:32,auto_run:71,rest:35,point_of_view:47,macro_set_up:103,macro_set_down:108,reply_to_tell:19,party_chat:25,linkshell_chat:38,say:31,slot_1:2,slot_2:3,slot_3:4,slot_4:5,slot_5:6,slot_6:7,slot_7:8,slot_8:9,slot_9:10,slot_10:11,slot_11:12,slot_12:13};
+const ffxiMods={equipment:["ctrl"],items:["ctrl"],magic:["ctrl"],job_abilities:["ctrl"],weapon_skills:["ctrl"],pet_commands:["ctrl"],attack:["ctrl"],check:["ctrl"],ranged_attack:["ctrl"],rest:["ctrl"],point_of_view:["ctrl"],macro_set_up:["ctrl"],macro_set_down:["ctrl"],reply_to_tell:["ctrl"],party_chat:["ctrl"],linkshell_chat:["ctrl"],say:["ctrl"]};
+// swipes: what a swipe up and down on a number adds.
+const GAMES={wow:{name:"World of Warcraft",short:"WoW",defaults:wowDefaults,mods:wowMods,swipes:["Shift","Ctrl"]},
+ ffxi:{name:"Final Fantasy XI",short:"FFXI",defaults:ffxiDefaults,mods:ffxiMods,swipes:["Ctrl","Alt"]}};
+const gameOptions=Object.entries(GAMES).map(([id,g])=>({data:id,label:g.name}));
+const gameOf=cfg=>GAMES[cfg.game]||GAMES.wow;
+const controlOptionsOf=cfg=>Object.keys(gameOf(cfg).defaults).map(x=>({data:x,label:x.replaceAll("_"," ")}));
+// The control to show: the one picked, if the game has it, or the game's first.
+const controlIn=(cfg,control)=>control in gameOf(cfg).defaults?control:Object.keys(gameOf(cfg).defaults)[0];
 // The key picker: [Linux key code, name].
 const keyNames=[[30,"A"],[48,"B"],[46,"C"],[32,"D"],[18,"E"],[33,"F"],[34,"G"],[35,"H"],[23,"I"],[36,"J"],[37,"K"],[38,"L"],[50,"M"],[49,"N"],[24,"O"],[25,"P"],[16,"Q"],[19,"R"],[31,"S"],[20,"T"],[22,"U"],[47,"V"],[17,"W"],[45,"X"],[21,"Y"],[44,"Z"],[11,"0"],[2,"1"],[3,"2"],[4,"3"],[5,"4"],[6,"5"],[7,"6"],[8,"7"],[9,"8"],[10,"9"],[59,"F1"],[60,"F2"],[61,"F3"],[62,"F4"],[63,"F5"],[64,"F6"],[65,"F7"],[66,"F8"],[67,"F9"],[68,"F10"],[87,"F11"],[88,"F12"],[1,"Esc"],[15,"Tab"],[57,"Space"],[28,"Enter"],[14,"Backspace"],[58,"Caps Lock"],[103,"Up"],[108,"Down"],[105,"Left"],[106,"Right"],[110,"Insert"],[111,"Delete"],[102,"Home"],[107,"End"],[104,"Page Up"],[109,"Page Down"],[12,"-"],[13,"="],[26,"["],[27,"]"],[39,";"],[40,"'"],[41,"`"],[43,"\\"],[51,","],[52,"."],[53,"/"],[82,"Numpad 0"],[79,"Numpad 1"],[80,"Numpad 2"],[81,"Numpad 3"],[75,"Numpad 4"],[76,"Numpad 5"],[77,"Numpad 6"],[71,"Numpad 7"],[72,"Numpad 8"],[73,"Numpad 9"],[98,"Numpad /"],[55,"Numpad *"],[74,"Numpad -"],[78,"Numpad +"],[83,"Numpad ."],[96,"Numpad Enter"],[69,"Num Lock"],[99,"Print Screen"],[70,"Scroll Lock"],[119,"Pause"],[42,"Left Shift"],[29,"Left Ctrl"],[56,"Left Alt"],[54,"Right Shift"],[97,"Right Ctrl"],[100,"Right Alt"]];
 const keyLabel=Object.fromEntries(keyNames);
@@ -16,10 +25,10 @@ const MODS=["ctrl","shift","alt"];
 const sortMods=mods=>MODS.filter(m=>mods.includes(m));
 // What a control sends, as {key, mods}: the binding saved for it (a number keeps the default modifiers, text such as
 // "shift+15" is the whole combination), or its default. The same rules as combo_for in driver/bin/pad_model.py.
-const comboOf=(cfg,control)=>{const v=(cfg.bindings||{})[control],mods=defaultMods[control]||[];
+const comboOf=(cfg,control)=>{const v=(cfg.bindings||{})[control],g=gameOf(cfg),mods=g.mods[control]||[];
  if(typeof v==="number"&&v>0&&v<248)return {key:v,mods};
  if(typeof v==="string"){const parts=v.toLowerCase().split("+").map(x=>x.trim()),key=Number(parts.pop());if(key>0&&key<248&&parts.every(p=>MODS.includes(p)))return {key,mods:sortMods(parts)}}
- return {key:defaults[control],mods}};
+ return {key:g.defaults[control],mods}};
 const comboText=c=>[...sortMods(c.mods).map(m=>m[0].toUpperCase()+m.slice(1)),keyLabel[c.key]||`key code ${c.key}`].join(" + ");
 // Theme ids as in driver/bin/pad_model.py.
 const themeOptions=[{data:"classic",label:"Classic (stone and gold)"},{data:"charcoal",label:"Charcoal (slate and blue)"},{data:"dark",label:"Dark (pure black)"},{data:"glass",label:"Game Glass (your picture)"}];
@@ -77,24 +86,26 @@ const onControllerState=changes=>{
 };
 function Content(){
  const [status,setStatus]=SP_REACT.useState({enabled:false});
- const [cfg,setCfg]=SP_REACT.useState({bindings:{},profiles:{},active_profile:"Default",sensitivity:1,theme:"classic",haptics:true,haptics_strength:1,burn_in:true,clock_24h:false,desktop_mode:false});
+ const [cfg,setCfg]=SP_REACT.useState({game:"wow",bindings:{},profiles:{},active_profile:"Default",sensitivity:1,theme:"classic",haptics:true,haptics_strength:1,burn_in:true,clock_24h:false,desktop_mode:false});
  const [control,setControl]=SP_REACT.useState("character");
  const [combo,setCombo]=SP_REACT.useState({key:46,mods:[]});
  const [profile,setProfile]=SP_REACT.useState("Default");
  const [newProfile,setNewProfile]=SP_REACT.useState("");
  const [message,setMessage]=SP_REACT.useState("");
  const [pictures,setPictures]=SP_REACT.useState({folder:"~/Pictures/JarnGrip",pictures:[]});
- const refresh=async()=>{try{const s=await call("get_status"),c=await call("get_config");setStatus(s);setCfg(c);setProfile(c.active_profile||"Default");setCombo(comboOf(c,control));setPictures(await call("list_backgrounds"))}catch(e){console.error("[jarngrip] status",e)}};
+ const refresh=async()=>{try{const s=await call("get_status"),c=await call("get_config");setStatus(s);setCfg(c);setProfile(c.active_profile||"Default");const ctl=controlIn(c,control);setControl(ctl);setCombo(comboOf(c,ctl));setPictures(await call("list_backgrounds"))}catch(e){console.error("[jarngrip] status",e)}};
  SP_REACT.useEffect(()=>{refresh()},[]);
  // A backend answer: take its config, or show its error.
- const apply=r=>{if(r&&r.error)setMessage(r.error);else setMessage("");if(r&&r.config){setCfg(r.config);setProfile(r.config.active_profile||"Default");setCombo(comboOf(r.config,control))}return r};
+ const apply=r=>{if(r&&r.error)setMessage(r.error);else setMessage("");if(r&&r.config){setCfg(r.config);setProfile(r.config.active_profile||"Default");const ctl=controlIn(r.config,control);setControl(ctl);setCombo(comboOf(r.config,ctl))}return r};
  const toggle=async v=>{apply(await call("set_enabled",v));await refresh()};
  const pickControl=v=>{setControl(v);setCombo(comboOf(cfg,v))};
  const writeBinding=async value=>{const bindings={...(cfg.bindings||{})};if(value===null)delete bindings[control];else bindings[control]=value;const r=await call("save_config",{...cfg,bindings});if(r.config){setCfg(r.config);setCombo(comboOf(r.config,control))}};
- const isDefault=c=>c.key===defaults[control]&&sortMods(c.mods).join()===sortMods(defaultMods[control]||[]).join();
+ const isDefault=c=>c.key===gameOf(cfg).defaults[control]&&sortMods(c.mods).join()===sortMods(gameOf(cfg).mods[control]||[]).join();
  const saveMapping=()=>writeBinding(isDefault(combo)?null:[...sortMods(combo.mods),combo.key].join("+"));
  const toggleMod=(m,on)=>setCombo({...combo,mods:on?sortMods([...combo.mods,m]):combo.mods.filter(x=>x!==m)});
  const keyOptions=keyLabel[combo.key]?keyNames.map(([c,n])=>({data:c,label:n})):[{data:combo.key,label:`Key code ${combo.key}`},...keyNames.map(([c,n])=>({data:c,label:n}))];
+ // Another game: its own controls and profiles come back (see select_game in main.py).
+ const selectGame=async game=>apply(await call("select_game",game));
  const loadProfile=async opt=>{setProfile(opt.data);apply(await call("select_profile",opt.data))};
  const saveProfile=async name=>{const r=apply(await call("save_profile",name));if(r&&r.ok)setNewProfile("")};
  const deleteProfile=async()=>apply(await call("delete_profile",profile));
@@ -117,7 +128,8 @@ function Content(){
  };
  return jsxs(DFL.PanelSection,{title:"Bottom-screen controls",children:[
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:"Enable JarnGrip",description:status.enabled?"The bottom screen pad is active.":"Starts the GTK touch pad in Armada's bottom gamescope session.",checked:!!status.enabled,onChange:toggle})}),
-  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Status",description:message||status.ayn_error||(status.enabled?`Running • profile ${cfg.active_profile||"Default"}`:"Stopped. Bound to the bottom gamescope session.")})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Status",description:message||status.ayn_error||(status.enabled?`Running • ${gameOf(cfg).short} • profile ${cfg.active_profile||"Default"}`:"Stopped. Bound to the bottom gamescope session.")})}),
+  jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Game",description:"Lays the pad out for this game. Each game keeps its own remapped controls and profiles.",childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:cfg.game||"wow",rgOptions:gameOptions,onChange:opt=>selectGame(opt.data)})})}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:`Shortcut: ${shortcutText(validShortcut(cfg.shortcut_buttons))}`,description:"Opens or closes the pad from anywhere, even in a game.",checked:cfg.shortcut!==false,onChange:setShortcut})}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",disabled:recordingNow,onClick:changeShortcut,children:recordingNow?"Press it now…":"Change shortcut"})}),
   ...(validShortcut(cfg.shortcut_buttons).join()!==DEFAULT_SHORTCUT.join()?[jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:()=>{shortcut=DEFAULT_SHORTCUT;setSetting("shortcut_buttons",DEFAULT_SHORTCUT)},children:"Back to Home + Start"})},"reset-shortcut")]:[]),
@@ -134,12 +146,12 @@ function Content(){
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",disabled:!newProfile.trim(),onClick:()=>saveProfile(newProfile),children:"Save as new profile"})}),
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",disabled:profileOptions.length<2,onClick:deleteProfile,children:`Delete ${profile}`})})]}),
   jsxs(DFL.PanelSection,{title:"Remap a control",children:[
-   jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Control",description:`Now sends ${comboText(comboOf(cfg,control))}`,childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:control,rgOptions:controlOptions,onChange:opt=>pickControl(opt.data)})})}),
+   jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Control",description:`Now sends ${comboText(comboOf(cfg,control))}`,childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:control,rgOptions:controlOptionsOf(cfg),onChange:opt=>pickControl(opt.data)})})}),
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Key",childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:combo.key,rgOptions:keyOptions,onChange:opt=>setCombo({...combo,key:opt.data})})})}),
    ...MODS.map(m=>jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:`With ${m[0].toUpperCase()+m.slice(1)}`,checked:combo.mods.includes(m),onChange:v=>toggleMod(m,v)})},m)),
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:saveMapping,children:`Save: ${comboText(combo)}`})}),
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:()=>writeBinding(null),children:"Reset to default"})}),
-   jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Number block",description:"Slots 1 to 12 are the number block. A swipe on a number adds Shift (up) or Ctrl (down) to what it sends; left cancels it."})})]}),
+   jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Number block",description:`Slots 1 to 12 are the number block. A swipe on a number adds ${gameOf(cfg).swipes[0]} (up) or ${gameOf(cfg).swipes[1]} (down) to what it sends; left cancels it.${cfg.game==="ffxi"?" Ctrl and Alt bring up FFXI's two macro bars.":""}`})})]}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.SliderField,{label:`Trackpad sensitivity: ${Number(cfg.sensitivity||1).toFixed(1)}×`,value:Number(cfg.sensitivity||1),min:.2,max:3,step:.1,showValue:true,onChange:setSensitivity})}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:()=>toggle(false),children:"Stop and restore screen services"})}),
   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:uninstall,children:"Uninstall JarnGrip"})}),

@@ -2,20 +2,25 @@
 
 ## The pad
 
-- **Pages**: Interface, Target and Utility, on the left half, send WoW's default keys. A page button is a real key: it is held while your finger is down, and several can be held at once.
-- **Number pad**, on the right half: action bar 1. A number is sent when your finger lifts, so a swipe can change it: **up** adds Shift, **down** adds Ctrl, **left** cancels, and **right** sends the plain number. A fan opens in the swipe's direction and names what lifting will send. Bind action bars 2 and 3 to Shift- and Ctrl-number in WoW to reach them this way.
+- **Pages**, on the left half, send the game's default keys: Interface, Target and Utility for WoW; Menus, Target and Utility for FFXI. A page button is a real key: it is held while your finger is down, and several can be held at once.
+  - **FFXI's party targets** (Self, Party 1 to 5): a tap picks the member; swipe **right** to press Enter after it, so a spell cast on `<stpt>` goes off at once. An **Enter** fan opens while you swipe.
+  - **FFXI's Macro set up / down** change the set once per tap, however long you hold: Ctrl goes down a moment before the arrow, or FFXI would take the arrow for the camera.
+- **Number pad**, on the right half. A number is sent when your finger lifts, so a swipe can change it: **up** and **down** add a modifier, **left** cancels, and **right** sends the plain number. A fan opens in the swipe's direction and names what lifting will send.
+  - **WoW**: action bar 1. Up adds Shift, down adds Ctrl. Bind action bars 2 and 3 to Shift- and Ctrl-number in WoW to reach them this way.
+  - **FFXI**: the macro palette. Up adds Ctrl (the upper macro bar), down adds Alt (the lower one). A tap sends the bare number.
 - **Trackpad** (header button): move, tap to click, two fingers to scroll, a scroll strip along the right edge, and **Left click** / **Right click** buttons that stay pressed while held, so they drag and turn the camera. Double-tap a click button to keep it held. **Shift, Ctrl and Alt** arm a modifier for the next click; a double tap locks one until you tap it again.
 - **Keyboard** (header button): letters, digits, one-shot Shift and Caps, and a `?123` page with symbols and arrow keys, under a small trackpad. A held key shows its character above your thumb.
 - **Settings** (gear button): the theme, which touchscreen and vibration motor the pad uses, **Unstick keys**, and **Close pad**, which gives the bottom screen back without going through Decky.
 
 ## The Decky panel
 
+- **Game**: World of Warcraft or Final Fantasy XI. Each game keeps its own remapped controls and profiles: switching sets one game's aside and brings the other's back.
 - **Shortcut**: **Home + Start** opens or closes the pad from anywhere in Game Mode, mid-game included, without opening Decky. A toast says which. **Change shortcut** records the next button or buttons you press instead, such as the AYN button below the screen; **Back to Home + Start** undoes it. Turn the shortcut off here if a game needs that combination.
 - **AYN button**: the button below the screen opens or closes the pad too. Steam still takes a screenshot each time unless you also turn on **Stop the screenshot**. Until then, **Home + R1** opens and closes the pad as well, because that is what the AYN button sends when InputPlumber emulates a Steam Deck controller.
 - **Stop the screenshot**: the AYN button sends F24, a key nothing uses, instead of the screenshot. JarnGrip does this by loading InputPlumber's profile again with that one button changed; no file changes. It stays until you turn it off or uninstall JarnGrip: InputPlumber forgets it when it restarts, and JarnGrip applies it again each time it starts.
 - **Theme**, **haptics** strength, **burn-in protection**, a **24-hour clock**, and **Start with Desktop Mode**.
 - **Remap a control**: pick a control, a key and any of **With Ctrl / Shift / Alt**, then save. **Reset to default** puts it back.
-- **Profiles**: saved sets of remaps. Load one, save to it, save as a new profile, or delete one.
+- **Profiles**: saved sets of remaps for the current game. Load one, save to it, save as a new profile, or delete one.
 - **Trackpad sensitivity**, **Stop and restore screen services**, and **Uninstall JarnGrip**, which uses Decky's own uninstall: it stops the pad, gives the bottom screen and the AYN button back, and removes JarnGrip, keeping your settings and profiles.
 
 While the pad runs, it stops Ratatoskr or Armada's own bottom-screen service, and starts it again when you stop the pad. Don't run two bottom-screen drivers at once.
