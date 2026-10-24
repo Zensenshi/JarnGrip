@@ -239,14 +239,20 @@ async def _bg(fn, *args):
 def _open_fifo(path: Path) -> int:
     """The FIFO the AYN button listener writes presses into, made if missing and opened for reading. Opened read-write,
     so that it always has a writer: with none, a FIFO reads as ended and would wake the reader over and over."""
-    try:
-        if path.exists() and not stat.S_ISFIFO(path.stat().st_mode):
-            path.unlink()
-        if not path.exists():
-            os.mkfifo(path, 0o600)
-    except OSError as err:
-        _log(f"AYN button: cannot make {path}: {err.strerror}", error=True)
+    if path.exists() and not stat.S_ISFIFO(path.stat().st_mode):
+        path.unlink()
+    if not path.exists():
+        os.mkfifo(path, 0o600)
     return os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+
+def _still_there(path: Path, fd: int) -> bool:
+    """Whether the file at path is still the one open as fd: not removed, and not replaced by a new one."""
+    try:
+        there, ours = os.stat(path), os.fstat(fd)
+    except OSError:
+        return False
+    return (there.st_dev, there.st_ino) == (ours.st_dev, ours.st_ino)
 
 
 def _number(value, low: float, high: float, default: float) -> float:
@@ -260,15 +266,19 @@ class Plugin:
     _ignore_until = 0.0  # AYN button presses before this (time.monotonic()) queued up during a toggle
     _ayn_error = ""      # what went wrong the last time the AYN button's screenshot was changed
     _ayn_lock = None
+    _fifo = -1
 
     async def _main(self):
-        # Nothing here may wait: Decky's requests are served on this same loop. The slow part runs in _start.
-        self._fifo = _open_fifo(AYN_FIFO)
+        # Nothing here may wait, or fail: Decky's requests are served on this same loop, and nothing would start the
+        # watching again. The slow part runs in _start.
         loop = asyncio.get_running_loop()
-        self._tasks = [loop.create_task(self._start()), loop.create_task(self._read_presses(self._fifo))]
+        self._tasks = [loop.create_task(self._start()), loop.create_task(self._listen_for_presses(AYN_FIFO))]
 
     async def _start(self):
-        await _bg(self._start_blocking)
+        try:
+            await _bg(self._start_blocking)
+        except Exception as err:  # noqa: BLE001 - the saved settings must still be applied
+            _log(f"start-up: {type(err).__name__}: {err}", error=True)
         await self._watch_ayn_button()
 
     @staticmethod
@@ -283,7 +293,7 @@ class Plugin:
     async def _unload(self):
         for task in getattr(self, "_tasks", []):
             task.cancel()
-        if getattr(self, "_fifo", -1) >= 0:
+        if self._fifo >= 0:
             os.close(self._fifo)
             self._fifo = -1
         # Only while JarnGrip runs: without it, a button that no longer takes screenshots would do nothing at all.
@@ -347,6 +357,42 @@ class Plugin:
         before = self._ayn_error
         if await self._sync_screenshot() != before:
             _log(f"AYN button: {self._ayn_error or 'screenshot setting applied'}", error=bool(self._ayn_error))
+
+    async def _listen_for_presses(self, path: Path):
+        """Read the listener's presses from the FIFO at path, opened as soon as it can be, and again whenever the one
+        there is no longer the one open here. It lives in /run/user/1000, which does not exist yet when Decky starts at
+        boot ahead of the user's session, and is made afresh when that session starts again."""
+        failed = ""
+        while True:
+            try:
+                fd = _open_fifo(path)
+            except OSError as err:
+                if err.strerror != failed:
+                    failed = err.strerror
+                    _log(f"AYN button: cannot open {path} yet ({failed}), trying every {WATCH_RETRY_S} s", error=True)
+                await asyncio.sleep(WATCH_RETRY_S)
+                continue
+            failed = ""
+            self._fifo = fd
+            _log(f"AYN button: reading presses from {path}")
+            reader = asyncio.ensure_future(self._read_presses(fd))
+            try:
+                while not reader.done() and _still_there(path, fd):
+                    await asyncio.wait({reader}, timeout=WATCH_RETRY_S)
+            finally:
+                reader.cancel()
+                # Let the reader take its fd off the loop before closing it, or a new FIFO given the same number would
+                # be taken off with it. _unload may have closed it already.
+                await asyncio.gather(reader, return_exceptions=True)
+                if self._fifo == fd:
+                    os.close(fd)
+                    self._fifo = -1
+            if reader.cancelled():
+                continue  # the FIFO went away or was replaced
+            if reader.exception():
+                _log(f"AYN button: {type(reader.exception()).__name__}: {reader.exception()}", error=True)
+                continue
+            return  # only in tests: the backend's FIFO never ends
 
     async def _read_presses(self, fd: int):
         """Toggle the pad on each press the listener reports (a byte each) while "AYN button" is on."""

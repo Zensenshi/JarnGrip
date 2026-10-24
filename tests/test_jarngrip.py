@@ -1138,6 +1138,58 @@ def test_the_ayn_button_toggles_the_pad_only_while_its_switch_is_on():
             main._active = active
 
 
+def test_the_ayn_button_is_heard_when_the_fifo_folder_comes_late_or_is_made_again():
+    """At boot Decky can start before the user's session makes /run/user/1000, and the session makes it afresh when it
+    starts again. Neither may leave the AYN button dead until Decky restarts."""
+    import asyncio
+    import shutil
+    import ayn_listen
+    import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backend(tmp)
+        main._write({**main._read(), "ayn_button": True})
+        run_dir = Path(tmp) / "run"
+        fifo = run_dir / "jarngrip-ayn"
+        saved = main.WATCH_RETRY_S, main._active
+        main.WATCH_RETRY_S, main._active = 0.05, lambda unit: False
+        plugin = main.Plugin()
+        calls = []
+
+        async def set_enabled(enabled):
+            calls.append(enabled)
+            return {"enabled": enabled}
+
+        plugin.set_enabled = set_enabled
+
+        async def press_until_heard(count):
+            plugin._ignore_until = 0.0
+            for _ in range(100):
+                ayn_listen.tell(fifo, 1)
+                await asyncio.sleep(0.02)
+                if len(calls) >= count:
+                    return
+            raise AssertionError("the press was never heard")
+
+        async def scenario():
+            listening = asyncio.ensure_future(plugin._listen_for_presses(fifo))
+            await asyncio.sleep(0.15)
+            assert not listening.done()  # no folder yet: still trying
+            run_dir.mkdir()
+            await press_until_heard(1)
+            shutil.rmtree(run_dir)
+            run_dir.mkdir()  # the session made it afresh
+            await press_until_heard(2)
+            listening.cancel()
+            await asyncio.gather(listening, return_exceptions=True)
+            assert plugin._fifo == -1
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            main.WATCH_RETRY_S, main._active = saved
+
+
 def test_uninstalling_from_decky_puts_things_back_and_keeps_the_settings():
     import asyncio
     import main
