@@ -612,6 +612,57 @@ def test_each_buzz_is_started_and_then_stopped():
     os.close(write_end)
 
 
+def test_a_bare_motor_is_reopened_after_its_last_buzz_and_a_gamepad_is_not():
+    with tempfile.TemporaryDirectory() as tmp:
+        node = os.path.join(tmp, "event8")
+        open(node, "w").close()
+        for name, reopens in (("qcom-hv-haptics", True), ("Microsoft X-Box 360 pad 0", False)):
+            uploads, looked_at = [], []
+            gamepad = os.path.join(tmp, "event7")
+            found = [(gamepad, "AYN Odin2 Gamepad", (haptics.FF_RUMBLE,)), (node, name, (haptics.FF_CONSTANT,))]
+            motor = haptics.Haptics(find=lambda: found, held=lambda fd: looked_at.append(fd) or False,
+                                    upload=lambda fd, kind, effect, ms, strength: uploads.append(effect) or 0)
+            open(gamepad, "w").close()
+            os.chmod(gamepad, 0)  # root-only, as on the Thor: the first open skips it
+            motor.configure(True, 0.7, 5)
+            assert uploads == [-1] and motor.name == name
+            os.chmod(gamepad, 0o600)  # the reopen must not even look at it now that it could be opened
+            rest, haptics.REST_S = haptics.REST_S, 0.05
+            try:
+                motor.pulse()
+                time.sleep(0.02)
+                motor.pulse()  # buzzing again puts the rest off: it comes once, after the last buzz
+                time.sleep(0.3)
+            finally:
+                haptics.REST_S = rest
+            assert uploads == ([-1, -1] if reopens else [-1]), name  # closed, opened and uploaded once more
+            assert motor.fd >= 0 and motor.node == node and len(looked_at) == len(uploads)
+            motor._rest(motor._pulses - 1)  # a rest for an older buzz does nothing
+            assert len(uploads) == (2 if reopens else 1)
+            motor.close()
+
+
+def test_a_motor_that_fails_to_reopen_is_tried_again_a_second_later():
+    clock = Clock()
+    with tempfile.TemporaryDirectory() as tmp:
+        node = os.path.join(tmp, "event8")
+        open(node, "w").close()
+        motor = haptics.Haptics(find=lambda: [(node, "qcom-hv-haptics", (haptics.FF_CONSTANT,))], clock=clock,
+                                held=lambda fd: False, upload=lambda *args: 0)
+        motor.configure(True, 0.7, 5)
+        os.remove(node)  # gone for a moment, as the motor is being reopened
+        motor._rest(motor._pulses)
+        assert motor.fd < 0
+        open(node, "w").close()
+        clock.now += 0.5
+        motor.configure(True, 0.7, 5)
+        assert motor.fd < 0  # not at once
+        clock.now += 0.5
+        motor.configure(True, 0.7, 5)
+        assert motor.fd >= 0  # a second later, not RETRY_S
+        motor.close()
+
+
 def test_haptics_without_a_motor_do_nothing_and_look_again_later():
     clock = Clock()
     looked = []

@@ -9,6 +9,10 @@ effect is uploaded and each buzz is a single write, so the game's and Steam's ow
 
 A device that another program has grabbed (EVIOCGRAB) is skipped: the kernel accepts the effect upload on it but
 silently drops every play request written to it, so it would look fine and never buzz.
+
+The qcom-hv-haptics motor stays powered after a buzz, stop or no stop: measured in Desktop Mode, the device drew about
+1.6 W more once the pad had buzzed, and a spot on its back grew too hot to touch, until the motor was closed. So a bare
+motor is closed and opened again REST_S after the last buzz, which puts it back at rest.
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ EFFECT_NAMES = {"rumble": FF_RUMBLE, "periodic": FF_PERIODIC, "constant": FF_CON
 MOTOR_EFFECTS = (FF_CONSTANT, FF_RUMBLE, FF_PERIODIC)
 GAMEPAD_EFFECTS = (FF_RUMBLE, FF_PERIODIC, FF_CONSTANT)
 RETRY_S = 10.0  # while no motor is found (or it went away), look again this often
+REST_S = 1.0    # a bare motor is closed and opened again this long after the last buzz: see above
 # Buzz patterns: (start, length) of each buzz, in units of the configured pulse length.
 PATTERNS = {
     "press": ((0.0, 1.0),),               # a button or key
@@ -58,6 +63,11 @@ def ff_bits(text: str) -> int:
     return value
 
 
+def is_motor(name: str) -> bool:
+    """A bare vibration motor, not a gamepad, by its device name."""
+    return any(word in name.lower() for word in ("vibra", "haptic", "rumble"))
+
+
 def find_motors(dev_dir: str = "/dev/input", sys_dir: str = "/sys/class/input") -> list:
     """[(node, name, effect types)] of every input device that can buzz, gamepads before bare motors. The effect
     types are the ones the device supports, best first."""
@@ -71,7 +81,7 @@ def find_motors(dev_dir: str = "/dev/input", sys_dir: str = "/sys/class/input") 
                 bits = ff_bits(f.read())
         except (OSError, ValueError):
             continue
-        motor = any(word in name.lower() for word in ("vibra", "haptic", "rumble"))
+        motor = is_motor(name)
         kinds = tuple(e for e in (MOTOR_EFFECTS if motor else GAMEPAD_EFFECTS) if bits >> e & 1)
         if kinds:
             found.append((motor, node, name, kinds))
@@ -111,10 +121,12 @@ def _upload(fd: int, kind: int, effect: int, length_ms: int, strength: float) ->
 
 
 class Haptics:
-    """Buzzes from the touch thread; configured once a second from the GTK thread.
+    """Buzzes from the touch thread; configured once a second from the GTK thread, and a bare motor reopened from a
+    timer after its last buzz.
 
     Uploading an effect to a virtual pad waits for the daemon behind it (InputPlumber) to answer, so the slow device
-    calls never run under the lock that pulses take: a stalled daemon must not stall touch input."""
+    calls never run under the lock that pulses take: a stalled daemon must not stall touch input. They take their own
+    lock instead, so that configuring and reopening never open a device twice."""
 
     def __init__(self, find=find_motors, clock=time.monotonic, held=held_elsewhere, upload=None) -> None:
         self._find = find
@@ -122,6 +134,8 @@ class Haptics:
         self._upload = upload or _upload
         self._clock = clock
         self.fd = -1
+        self.node = ""
+        self.name = ""
         self.kind = 0
         self.effect = -1
         self.enabled = False
@@ -130,11 +144,16 @@ class Haptics:
         self.effect_kind = None  # force one effect type ("haptics_effect" in the config); None picks per device
         self._pulses = 0         # counts patterns, so that the steps of an older one leave a newer one alone
         self._io = threading.RLock()  # guards fd and effect: pulses, their timers and configure all use them
+        self._setup = threading.RLock()  # opening, uploading and closing; taken before _io, never while holding it
         self.status = "off"
         self._last_try = -RETRY_S
 
     def configure(self, enabled: bool, strength: float, length_ms: int, effect: str = "") -> None:
         """Apply the settings; cheap to call every second. Also looks for a motor again while none is open."""
+        with self._setup:
+            self._configure(enabled, strength, length_ms, effect)
+
+    def _configure(self, enabled: bool, strength: float, length_ms: int, effect: str) -> None:
         strength = max(0.05, min(1.0, strength))
         length_ms = max(5, min(100, int(length_ms)))
         kind = EFFECT_NAMES.get(effect)
@@ -158,12 +177,15 @@ class Haptics:
                     if self.fd == fd:
                         self._lost(err)
 
-    def _open(self) -> None:
+    def _open(self, only: str = "") -> None:
+        """Open the best device that can buzz, or only the one at node only."""
         self._last_try = self._clock()
         self.status = "no vibration motor found"
         names = {v: k for k, v in EFFECT_NAMES.items()}
         skipped = []
         for node, name, kinds in self._find():
+            if only and node != only:
+                continue
             if self.effect_kind is not None:
                 kinds = tuple(k for k in kinds if k == self.effect_kind)
             for kind in kinds:  # a driver may list an effect type and still refuse it: try the next one
@@ -183,7 +205,7 @@ class Haptics:
                     self.status = f"{name} ({node}) refused a {names[kind]} effect: {err.strerror}"
                     continue
                 with self._io:
-                    self.fd, self.kind, self.effect = fd, kind, effect
+                    self.fd, self.node, self.name, self.kind, self.effect = fd, node, name, kind, effect
                 self.status = f"{name} ({node}), {names[kind]} effect"
                 return
         if skipped and self.status == "no vibration motor found":
@@ -195,17 +217,35 @@ class Haptics:
         if self.fd < 0:
             return
         self._pulses += 1
-        for start, length in PATTERNS.get(pattern, PATTERNS["press"]):
-            self._at(start * self.length_ms, 1)
-            self._at((start + length) * self.length_ms, 0)
+        steps = PATTERNS.get(pattern, PATTERNS["press"])
+        for start, length in steps:
+            self._at(start * self.length_ms, self._send, 1)
+            self._at((start + length) * self.length_ms, self._send, 0)
+        if is_motor(self.name):
+            end = max(start + length for start, length in steps) * self.length_ms
+            self._at(end + REST_S * 1000.0, self._rest)
 
-    def _at(self, ms: float, value: int) -> None:
+    def _at(self, ms: float, job, *args) -> None:
+        """Run job(pulse, *args) after ms, for the pattern playing now."""
         if ms <= 0:
-            self._send(self._pulses, value)
+            job(self._pulses, *args)
             return
-        timer = threading.Timer(ms / 1000.0, self._send, (self._pulses, value))
+        timer = threading.Timer(ms / 1000.0, job, (self._pulses, *args))
         timer.daemon = True
         timer.start()
+
+    def _rest(self, pulse: int) -> None:
+        """A while after a bare motor's last buzz: close it and open it again, which leaves it at rest (see above).
+        Only that motor: looking at the others would briefly grab the gamepad, which InputPlumber must hold."""
+        with self._setup:
+            with self._io:
+                if pulse != self._pulses or self.fd < 0:
+                    return  # it buzzed again since, or it was closed
+                node = self.node
+                self._close()
+            self._open(only=node)
+            if self.fd < 0:
+                self._last_try = self._clock() - RETRY_S + 1.0  # look again in a second, not RETRY_S
 
     def _send(self, pulse: int, value: int) -> None:
         with self._io:
@@ -217,12 +257,12 @@ class Haptics:
                 self._lost(err)
 
     def _lost(self, err: OSError) -> None:
-        self.close()
+        self._close()  # under _io already: close() would take _setup after it
         self.status = f"motor lost ({err.strerror}); looking for it again"
         self._last_try = self._clock()
 
     def close(self) -> None:
-        with self._io:
+        with self._setup, self._io:
             self._close()
 
     def _close(self) -> None:
