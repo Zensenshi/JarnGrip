@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- **Final Fantasy XI.** Pick the game in Decky: the pad lays out FFXI's default keys on Menus, Target and Utility pages. Each game keeps its own remapped controls and profiles; switching sets one game's aside and brings the other's back.
+  - The number pad is FFXI's macro palette: swipe up for Ctrl (the upper bar), down for Alt (the lower one).
+  - Swipe a party target (Self, Party 1 to 5) right to press Enter after it, so a spell cast on `<stpt>` goes off at once. An Enter fan opens while you swipe.
+  - Macro set up and down change the set once per tap, however long you hold. Ctrl goes down well before the arrow, or FFXI takes the arrow for the camera.
+- **The AYN button works after a reboot.** Decky starts before the user's session exists, so the backend could not open the channel the button's presses arrive on and never tried again. It now keeps trying, and opens it again if the session restarts.
+- **The vibration motor no longer stays powered after a buzz.** In Desktop Mode, where InputPlumber holds the gamepad, the pad buzzes the `qcom-hv-haptics` motor directly. After the pad had buzzed it, that motor kept drawing about 1.6 W until the pad closed, and a spot on the back of the device grew too hot to touch. The pad now closes the motor and opens it again a second after the last buzz, which puts it back at rest. The gamepad that Game Mode uses is left as it was.
+- **"Stop the screenshot" no longer takes the controller away.** It loads InputPlumber's profile with the target devices InputPlumber has at that moment, plus a keyboard. At boot, InputPlumber switches those devices as Steam starts, and a load in the middle of that left the keyboard as the only one: the controller did nothing until the Thor restarted. JarnGrip now changes the profile only while a gamepad is among them, and otherwise tries again a few seconds later. If the gamepad goes missing afterwards, it brings back the one that was there.
+
 ## 0.7.1
 
 - **Opening and closing the pad is faster.** The Decky backend now reaches the user's service manager directly instead of through `systemd-machined`, and no longer runs a call a second time when its answer was "no". Together these added 1 to 3.5 seconds each way.
