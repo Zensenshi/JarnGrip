@@ -23,6 +23,13 @@ COMPOSITE = "org.shadowblip.Input.CompositeDevice"
 TARGET = "org.shadowblip.Input.Target"
 STOCK_PROFILE = "/usr/share/inputplumber/profiles/default.yaml"
 MARK = " + JarnGrip"  # ends the name of a profile this module loaded
+# InputPlumber's gamepad target device types. The profile lists the targets InputPlumber has when it is loaded, so it is
+# loaded only while one of them is a gamepad. At boot, InputPlumber switches its targets as Steam starts, and a load in
+# the middle of that once left the keyboard as the only target: no controller until a restart. A type missing here
+# only delays the change; the gamepad types in use are kept, to bring the gamepad back should it go missing later.
+GAMEPADS = {"gamepad", "deck", "deck-uhid", "ds5", "ds5-edge", "xb360", "xbox-elite", "xbox-series", "horipad-steam",
+            "unified-gamepad"}
+WAITING = "Waiting for InputPlumber's controller before changing the AYN button."
 MAPPING = """- name: AYN button (JarnGrip)
   source_event:
     gamepad:
@@ -111,6 +118,7 @@ def _call(path: str, method: str, *args: str):
 
 
 _known: list = []  # [(D-Bus path, name)] of the AYN devices, kept until InputPlumber fails a call
+_missing: set = set()  # devices whose gamepad was missing from our profile's targets at the last check
 
 
 def _ayn_devices() -> list:
@@ -142,20 +150,35 @@ def sync(wanted: bool, state_file: Path) -> str:
     if not wanted and not saved:
         return ""  # never changed anything: nothing to put back, and no need to ask InputPlumber
     global _known
+    problem = ""
     try:
         for path, device in _ayn_devices():
             ours = str(_get(path, COMPOSITE, "ProfileName")).endswith(MARK)
             if wanted:
-                # Target paths end in their kind and a number (".../target/keyboard0"): no need to ask each one.
                 target_paths = [str(t) for t in _get(path, COMPOSITE, "TargetDevices") or []]
-                if ours and any(t.rsplit("/", 1)[-1].startswith("keyboard") for t in target_paths):
-                    continue  # the usual case, every few seconds: two calls, and nothing to do
-                targets = [str(_get(t, TARGET, "DeviceType")) for t in target_paths]
+                targets = [t for t in (str(_get(t, TARGET, "DeviceType") or "") for t in target_paths) if t]
+                pads = [t for t in targets if t in GAMEPADS]
+                if ours and pads and "keyboard" in targets:
+                    _missing.discard(device)
+                    continue  # the usual case, every few seconds: nothing to do
+                if not pads:
+                    remembered = (saved.get(device) or {}).get("gamepads") or []
+                    if not (ours and remembered and device in _missing):
+                        # Loading now would leave no gamepad. At boot, InputPlumber is still switching its targets:
+                        # try again on the next check. With our profile loaded, the gamepad went missing since: bring
+                        # it back if it is still missing at the next check (Steam may be switching it).
+                        if ours:
+                            _missing.add(device)
+                        problem = WAITING
+                        continue
+                    targets = [*remembered, *targets]
+                _missing.discard(device)
                 profile = _call(path, "GetProfileYaml")[0]
                 if not ours:
                     saved[device] = {"path": str(_get(path, COMPOSITE, "ProfilePath") or ""), "yaml": profile}
-                    _write_state(state_file, saved)
-                _call(path, "LoadProfileFromYaml", "s", without_screenshot(profile, [t for t in targets if t]))
+                saved.setdefault(device, {})["gamepads"] = [t for t in targets if t in GAMEPADS]
+                _write_state(state_file, saved)
+                _call(path, "LoadProfileFromYaml", "s", without_screenshot(profile, targets))
             else:
                 before = saved.pop(device, None) or {}
                 if ours:
@@ -174,7 +197,7 @@ def sync(wanted: bool, state_file: Path) -> str:
         return f"Could not change the AYN button: {text}"
     except (ValueError, LookupError, TypeError) as err:
         return f"Could not change the AYN button: {err}"
-    return ""
+    return problem
 
 
 def _write_state(state_file: Path, saved: dict) -> None:

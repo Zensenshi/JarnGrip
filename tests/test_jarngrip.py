@@ -1027,8 +1027,8 @@ def test_the_screenshot_setting_loads_the_change_and_puts_the_old_profile_back()
             ip["loads"].append("yaml")
             ip["yaml"], ip["path"] = text, ""
             ip["name"] = next(l[6:].strip().strip('"') for l in text.splitlines() if l.startswith("name:"))
-            if "- keyboard" in text and "keyboard" not in ip["targets"]:
-                ip["targets"].append("keyboard")
+            lines = text.splitlines()  # the targets are the profile's, as in the real InputPlumber
+            ip["targets"] = [l[2:] for l in lines[lines.index("target_devices:") + 1:lines.index("mapping:")]]
             return None
         if method == "LoadProfilePath":
             ip["loads"].append(args[6])
@@ -1049,16 +1049,37 @@ def test_the_screenshot_setting_loads_the_change_and_puts_the_old_profile_back()
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "inputplumber.json"
             assert ayn_button.sync(False, state) == "" and ip["loads"] == []  # never on: InputPlumber is left alone
+            # At boot InputPlumber switches its targets: a load with no gamepad among them would leave none at all.
+            for targets in ([], ["keyboard"], ["mouse", "keyboard"]):
+                ip["targets"] = targets
+                assert ayn_button.sync(True, state) == ayn_button.WAITING
+                assert ip["loads"] == [] and not state.exists(), targets
+            ip["targets"] = ["deck-uhid"]
+            assert ayn_button.sync(True, state) == ""
+            assert ip["targets"] == ["deck-uhid", "keyboard"] and "- deck-uhid" in ip["yaml"]
+            ip.update(name="Default", path="/usr/share/inputplumber/profiles/default.yaml", yaml=THOR_PROFILE,
+                      targets=["xb360"], loads=[])
+            state.unlink()
             assert ayn_button.sync(True, state) == ""
             assert ip["name"] == "Default + JarnGrip" and "keyboard" in ip["targets"] and state.exists()
             calls.clear()
             assert ayn_button.sync(True, state) == "" and ip["loads"] == ["yaml"]  # already done: not loaded again
-            assert len(calls) == 2  # the check every few seconds: the profile's name and the target devices
+            assert len(calls) == 4  # the check every few seconds: the profile's name, the targets and their types
+            # The gamepad went missing with our profile loaded: it is brought back, but only if still missing at the
+            # next check, so that a switch Steam is making is not fought.
+            ip["targets"] = ["keyboard"]
+            assert ayn_button.sync(True, state) == ayn_button.WAITING and ip["loads"] == ["yaml"]
+            ip["targets"] = ["deck", "keyboard"]  # it was a switch: left alone
+            assert ayn_button.sync(True, state) == "" and ip["loads"] == ["yaml"]
+            ip["targets"] = ["keyboard"]
+            ayn_button.sync(True, state)
+            assert ayn_button.sync(True, state) == "" and ip["loads"] == ["yaml", "yaml"]
+            assert ip["targets"] == ["xb360", "keyboard"]
             # InputPlumber restarted: its stock profile is back, and the keyboard is gone.
             ip.update(name="Default", path="/usr/share/inputplumber/profiles/default.yaml", yaml=THOR_PROFILE,
                       targets=["xb360"])
             ayn_button.sync(True, state)
-            assert ip["loads"] == ["yaml", "yaml"] and ip["name"].endswith("+ JarnGrip")
+            assert ip["loads"] == ["yaml"] * 3 and ip["name"].endswith("+ JarnGrip")
             assert ayn_button.sync(False, state) == ""
             assert ip["loads"][-1] == "/usr/share/inputplumber/profiles/default.yaml" and ip["name"] == "Default"
             assert not state.exists()
