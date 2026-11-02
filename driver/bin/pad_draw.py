@@ -12,7 +12,8 @@ from dataclasses import dataclass, fields
 
 import cairo
 
-from pad_model import BODY_Y, KEY_TEXT, KEY_WORD_TEXT, MARGIN, PANEL_PAD, THEME_IDS, THEME_Y, H, W, PadController, Widget
+from pad_model import (BODY_Y, KEY_TEXT, KEY_WORD_TEXT, MARGIN, PANEL_PAD, RADIAL_CANCEL, RADIAL_DIRECTIONS, RADIAL_GROW,
+                       RADIAL_HUB, THEME_IDS, THEME_Y, H, W, PadController, Widget, radial_reach)
 
 
 def _rgb(value: int) -> tuple:
@@ -329,9 +330,18 @@ def _glow(cr, t: Theme, cx: float, cy: float, radius: float) -> None:
     cr.fill()
 
 
-def _icon(cr, name: str, cx: float, cy: float, s: float, color: tuple) -> None:
+def _triangle(cr, x: float, cy: float, dx: float, h: float) -> None:
+    """A filled play triangle: its flat side at x, h high, its tip dx along."""
+    cr.move_to(x, cy - h / 2)
+    cr.line_to(x + dx, cy)
+    cr.line_to(x, cy + h / 2)
+    cr.close_path()
+    cr.fill()
+
+
+def _icon(cr, name: str, cx: float, cy: float, s: float, color: tuple, alpha: float = 1.0) -> None:
     """Line icons, drawn so that no font has to carry them. s is half the icon's size."""
-    cr.set_source_rgb(*color)
+    cr.set_source_rgba(*color, alpha)
     cr.set_line_width(max(3.0, s * 0.16))
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     cr.set_line_join(cairo.LINE_JOIN_ROUND)
@@ -374,6 +384,39 @@ def _icon(cr, name: str, cx: float, cy: float, s: float, color: tuple) -> None:
         cr.move_to(cx + s * 0.55, cy - s * 0.25)
         cr.line_to(cx + s * 0.05, cy + s * 0.25)
         cr.stroke()
+    elif name == "play_pause":
+        _triangle(cr, cx - s, cy, s * 0.9, s * 1.4)
+        for x in (cx + s * 0.35, cx + s * 0.85):
+            cr.move_to(x, cy - s * 0.6)
+            cr.line_to(x, cy + s * 0.6)
+        cr.stroke()
+    elif name in ("previous", "next"):
+        side = 1 if name == "next" else -1  # previous is next, mirrored
+        _triangle(cr, cx - side * s * 0.8, cy, side * s * 1.2, s * 1.4)
+        cr.move_to(cx + side * s * 0.7, cy - s * 0.6)
+        cr.line_to(cx + side * s * 0.7, cy + s * 0.6)
+        cr.stroke()
+    elif name in ("volume_down", "volume_up", "mute"):
+        # A speaker, with one sound wave for down, two for up, and a cross for mute.
+        cr.move_to(cx - s, cy - s * 0.3)
+        cr.line_to(cx - s * 0.6, cy - s * 0.3)
+        cr.line_to(cx - s * 0.1, cy - s * 0.75)
+        cr.line_to(cx - s * 0.1, cy + s * 0.75)
+        cr.line_to(cx - s * 0.6, cy + s * 0.3)
+        cr.line_to(cx - s, cy + s * 0.3)
+        cr.close_path()
+        cr.fill()
+        if name == "mute":
+            cr.move_to(cx + s * 0.3, cy - s * 0.35)
+            cr.line_to(cx + s, cy + s * 0.35)
+            cr.move_to(cx + s, cy - s * 0.35)
+            cr.line_to(cx + s * 0.3, cy + s * 0.35)
+            cr.stroke()
+        else:
+            for r in (0.45, 0.85)[: 1 if name == "volume_down" else 2]:
+                cr.new_sub_path()
+                cr.arc(cx - s * 0.1, cy, s * r, -math.pi / 4, math.pi / 4)
+            cr.stroke()
     else:  # an arrow: left, right, up or down
         dx, dy = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}[name]
         tip_x, tip_y = cx + dx * s * 0.8, cy + dy * s * 0.8
@@ -534,6 +577,107 @@ def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
           max(max_w, 60.0))
 
 
+RADIAL_GAP = 8.0        # between two slices of a radial
+RADIAL_SCRIM = 0.4      # how much an open radial darkens the pad behind it
+RADIAL_TEXT = 32.0
+RADIAL_ICON = 30.0      # half a slice icon's size
+RADIAL_EMPTY = 0.35     # how faint an empty slice is
+RADIAL_WHORL = 0.3      # how far into its bloom a radial's diagonal slices start to open, after the upright ones
+RADIAL_BUD = 0.35       # how wide a slice is, of its full width, as it starts to open
+
+
+def _bloom(p: float) -> float:
+    """How far open a petal is, p of the way through its bloom: fast, a little past fully open, then settling."""
+    q = p - 1.0
+    return 1.0 + 2.0 * q ** 3 + q ** 2
+
+
+def _slice_path(cr, cx: float, cy: float, r0: float, r1: float, angle: float, spread: float = 1.0) -> None:
+    """One slice of a radial: the ring between radii r0 and r1 over the eighth of a turn around angle (or spread of
+    it), RADIAL_GAP narrower along both sides so that slices stand apart."""
+    half = math.pi / 8 * spread
+    gi, go = RADIAL_GAP / 2 / r0, RADIAL_GAP / 2 / r1
+    cr.new_path()
+    cr.arc(cx, cy, r1, angle - half + go, angle + half - go)
+    cr.arc_negative(cx, cy, r0, angle + half - gi, angle - half + gi)
+    cr.close_path()
+
+
+def _radial(cr, t: Theme, w: Widget, chosen: str | None, growth: float) -> None:
+    """An open radial over the darkened pad: a slice per channel around a hub in the middle of its button. The chosen
+    slice reaches further and lights up like a pressed button; Cancel is always red, and an empty slice is faint. It
+    blooms (growth from 0 to 1) like a flower: the hub swells, and the slices open out of it as petals, widening as
+    they reach out, the upright ones first."""
+    cr.set_source_rgba(0, 0, 0, RADIAL_SCRIM * growth)
+    cr.paint()
+    cx, cy = w.center
+    reach = radial_reach(cx, cy)
+    slices = dict(w.data.radial)
+    for i, direction in enumerate(RADIAL_DIRECTIONS):
+        angle = i * math.pi / 4
+        slot = slices.get(direction)
+        cancel = direction == RADIAL_CANCEL
+        lit = direction == chosen
+        empty = slot is None and not cancel
+        petal = min(1.0, max(0.0, (growth - (RADIAL_WHORL if i % 2 else 0.0)) / (1.0 - RADIAL_WHORL)))
+        opened = _bloom(petal)
+        r1 = RADIAL_HUB + (reach - RADIAL_HUB) * opened + (RADIAL_GROW if lit else 0.0)
+        if r1 - RADIAL_HUB < RADIAL_GAP:
+            continue
+
+        def path() -> None:
+            _slice_path(cr, cx, cy, RADIAL_HUB, r1, angle, RADIAL_BUD + (1.0 - RADIAL_BUD) * petal)
+
+        if t.glass:
+            tint = ((_rgb(LOW), 0.75 if lit else 0.5) if cancel else ((1.0, 1.0, 1.0), GLASS_LIT) if lit
+                    else ((0.0, 0.0, 0.0), GLASS_TINT["muted" if empty else "rest"]))
+            _frost(cr, t, path, tint)
+            path()
+            cr.set_source_rgba(1, 1, 1, 0.9 if lit else 0.12 if empty else 0.28)
+            cr.set_line_width(2)
+            cr.stroke()
+        else:
+            alpha = RADIAL_EMPTY if empty else 0.97
+            if t.shadow and not empty:
+                cr.save()
+                cr.translate(4, 8)
+                path()
+                cr.set_source_rgba(0, 0, 0, t.shadow * 0.8)
+                cr.fill()
+                cr.restore()
+            top, bottom = t.danger if cancel else t.pressed if lit else t.key
+            fill = cairo.RadialGradient(cx, cy, RADIAL_HUB, cx, cy, r1)
+            fill.add_color_stop_rgba(0, *top, alpha)
+            fill.add_color_stop_rgba(1, *bottom, alpha)
+            path()
+            cr.set_source(fill)
+            cr.fill()
+            path()
+            # The trim as on a fan: Classic's gold, and on the flat themes the color of the face.
+            edge = (t.border_active if t.inner or not cancel else t.danger[0]) if lit or cancel else t.border_muted
+            cr.set_source_rgba(*edge, alpha)
+            cr.set_line_width((5.0 if lit else 3.0) * t.trim)
+            cr.stroke()
+        if empty:
+            continue
+        # The lettering keeps its full size as it rides out with the petal, and fades in.
+        full = RADIAL_HUB + 0.58 * (reach - RADIAL_HUB) + (RADIAL_GROW / 2 if lit else 0.0)
+        at = RADIAL_HUB + (full - RADIAL_HUB) * opened
+        color = t.danger_text if cancel else t.text_pressed if lit else t.text
+        lx, ly = cx + at * math.cos(angle), cy + at * math.sin(angle)
+        if not cancel and slot.icon:
+            _icon(cr, slot.icon, lx, ly, RADIAL_ICON + (4 if lit else 0), color, alpha=petal)
+        else:
+            _text(cr, t, lx, ly, ["Cancel" if cancel else slot.label], RADIAL_TEXT + (4 if lit else 0), color,
+                  2 * full * math.sin(math.pi / 8) - 24, alpha=petal)
+    swell = min(1.0, growth / (1.0 - RADIAL_WHORL))
+    full_hub = RADIAL_HUB - RADIAL_GAP
+    hub = full_hub * _bloom(swell)
+    if hub > 1.0:
+        _face(cr, t, cx - hub, cy - hub, 2 * hub, 2 * hub, radius=hub / t.rounding, raised=True)
+        _text(cr, t, cx, cy, [w.label], 30, t.text, 2 * full_hub - 24, alpha=swell)
+
+
 def _status(cr, t: Theme, w: Widget, info: tuple | None) -> None:
     """The clock, and under it the battery: an outline filled to its charge, a bolt while charging."""
     if not info:
@@ -580,7 +724,8 @@ def _widget(cr, t: Theme, pad: PadController, w: Widget) -> None:
     elif kind == "surface":
         _face(cr, t, w.x, w.y, w.w, w.h, radius=34)
         if pad.hint_alpha > 0:  # the hint fades away after a while: a fixed line of text is what burns in first
-            _text(cr, t, cx, cy, ["Move  ·  tap to click  ·  two fingers scroll"], 26, t.text, w.w - 160,
+            hint = "two fingers scroll or pinch to zoom" if pad.game.gestures else "two fingers scroll"
+            _text(cr, t, cx, cy, ["Move  ·  tap to click  ·  " + hint], 26, t.text, w.w - 160,
                   alpha=0.3 * pad.hint_alpha)
     elif kind == "tab":
         active = pad.view == "pad" and pad.page == w.data
@@ -620,11 +765,21 @@ def _widget(cr, t: Theme, pad: PadController, w: Widget) -> None:
         cr.fill()
         _face(cr, own, w.x, w.y, w.w, w.h, radius=24, emphasized=chosen, raised=chosen, muted=not chosen)
         _text(cr, own, cx, cy, [w.label], w.size, own.text, w.w - 28)
+    elif kind == "page" and w.data.radial:
+        active = lit or w.id in pad.swipes  # pushed in while its radial is open
+        r = w.w / 2
+        _face(cr, t, w.x, w.y, w.w, w.h, radius=r / t.rounding, active=active, raised=not active)
+        _text(cr, t, cx, cy, [w.label], w.size, t.text_pressed if active else t.text, 2 * r - 24)
     else:  # page, number, unstick, close
         number = kind == "number"
         _face(cr, t, w.x, w.y, w.w, w.h, active=lit, muted=not number, raised=number)
         _text(cr, t, cx, cy, _wrap(w.label) if w.wrap else [w.label], w.size, t.text_pressed if lit else t.text,
               w.w - 28)
+
+
+def _swipe_word(pad: PadController, swipe: str) -> str:
+    """What a swipe on a number does, as its fan and the guide over the number block name it."""
+    return "Cancel" if swipe == "cancel" else pad.game.swipes[swipe][0]
 
 
 def _swipe_guide(cr, t: Theme, pad: PadController) -> None:
@@ -637,7 +792,7 @@ def _swipe_guide(cr, t: Theme, pad: PadController) -> None:
     y = BODY_Y + room / 2
     color = tuple(c * 0.6 * pad.hint_alpha + b * (1 - 0.6 * pad.hint_alpha) for c, b in zip(t.text, t.background))
     # The arrows are drawn, not typed: the bundled fonts have no arrow characters.
-    words = ("Cancel", pad.game.swipes["up"][0], pad.game.swipes["down"][0])
+    words = [_swipe_word(pad, swipe) for swipe in ("cancel", "up", "down")]
     for w, word, arrow, side in zip(numbers[:3], words, ("left", "up", "down"), (-1, -1, -1)):
         cx = w.x + w.w / 2
         _text(cr, t, cx - side * 14, y, [word], 24, t.text, w.w - 50, alpha=0.6 * pad.hint_alpha)
@@ -695,12 +850,17 @@ def _paint_pad(cr, t: Theme, pad: PadController) -> None:
         _settings(cr, t, pad)
     elif pad.view == "pad":
         _swipe_guide(cr, t, pad)
-    # Key previews last: they reach over the keys above and over the trackpad.
+    # Key previews last: they reach over the keys above and over the trackpad. The swipes are read once: the touch
+    # thread may change them while this paints.
+    swipes = dict(pad.swipes)
     for widget in pad.widgets:
         if widget.kind == "key" and widget.data.action == "input" and pad.lit(widget):
             _preview(cr, t, widget, pad.key_typed.get(widget.id) or pad.key_label(widget.data))
-        elif widget.kind == "number" and widget.id in pad.swipes:
-            swipe = pad.swipes[widget.id]
-            _swipe_fan(cr, t, widget, swipe, "Cancel" if swipe == "cancel" else pad.game.swipes[swipe][0])
-        elif widget.kind == "page" and widget.id in pad.swipes:
+        elif widget.kind == "number" and widget.id in swipes:
+            _swipe_fan(cr, t, widget, swipes[widget.id], _swipe_word(pad, swipes[widget.id]))
+        elif widget.kind == "page" and widget.id in swipes and not widget.data.radial:
             _swipe_fan(cr, t, widget, "confirm", "Enter")
+    # An open radial goes over everything, fans included.
+    for widget in pad.widgets:
+        if widget.kind == "page" and widget.data.radial and widget.id in swipes:
+            _radial(cr, t, widget, swipes[widget.id], pad.radial_growth())

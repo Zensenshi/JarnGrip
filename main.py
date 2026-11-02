@@ -49,7 +49,7 @@ PAUSED_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada
 THEMES = ("classic", "charcoal", "dark", "glass")
 # The games the pad has a layout for (pad_model.GAMES). Each keeps its own remapped controls and profiles: the current
 # game's are at the top of the config, the others' set aside under "games".
-GAMES = ("wow", "ffxi")
+GAMES = ("wow", "ffxi", "desktop")
 PER_GAME = ("bindings", "profiles", "active_profile")
 BACKGROUNDS = HOME / "Pictures/JarnGrip"
 PICTURE_TYPES = (".png", ".jpg", ".jpeg", ".webp")

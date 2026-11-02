@@ -136,8 +136,9 @@ def test_the_top_touchscreen_is_never_picked_and_there_is_no_fallback():
 
 def test_every_view_fits_the_screen_without_overlaps():
     views = [("pad", p, False, game) for game in pad_model.GAMES.values() for p in range(len(game.pages))] + [
-        ("trackpad", 0, False, pad_model.WOW), ("keyboard", 0, False, pad_model.WOW),
-        ("keyboard", 0, True, pad_model.WOW), ("settings", 0, False, pad_model.WOW)]
+        ("trackpad", 0, False, pad_model.WOW), ("trackpad", 0, False, pad_model.DESKTOP), ("keyboard", 0, False, pad_model.WOW),
+        ("keyboard", 0, True, pad_model.WOW), ("keyboard", 0, False, pad_model.DESKTOP),
+        ("keyboard", 0, True, pad_model.DESKTOP), ("settings", 0, False, pad_model.WOW)]
     for view, page, symbols, game in views:
         _, widgets = build_layout(view, page, symbols, game)
         assert len({w.id for w in widgets}) == len(widgets), view
@@ -153,10 +154,10 @@ def test_every_view_fits_the_screen_without_overlaps():
 
 def test_a_page_with_more_than_eight_buttons_splits_into_two_columns():
     def columns(page, game):
-        return len({w.x for w in build_layout("pad", page, game=game)[1] if w.kind == "page"})
+        return len({w.x for w in build_layout("pad", page, game=game)[1] if w.kind == "page" and not w.data.radial})
 
-    assert [columns(p, pad_model.WOW) for p in range(3)] == [2, 1, 2]
-    assert [columns(p, pad_model.FFXI) for p in range(3)] == [2, 2, 2]
+    assert [columns(p, pad_model.WOW) for p in range(2)] == [2, 1]  # Utility is laid out in rows
+    assert [columns(p, pad_model.FFXI) for p in range(2)] == [2, 2]
 
 
 def test_number_keys_are_not_much_taller_than_wide_and_are_centered():
@@ -198,7 +199,9 @@ def test_two_page_buttons_can_be_held_at_once():
 
 
 def test_every_button_sends_one_key_per_press():
-    """One press, one action: what Blizzard allows input software to do. No button may send a sequence of keys."""
+    """One press, one action: what Blizzard allows input software to do. No button may send a sequence of keys. A tap
+    on a radial chooses nothing, so it sends nothing, and a second tap closes it. The one exception is a WoW chat slice, which types a channel
+    command into the chat box and never sends it (test_every_chat_command_can_be_typed_and_never_presses_enter)."""
     modifiers = set(pad_model.MOD_CODES.values())
     pad, bridge, clock = make()
     for game in pad_model.GAMES:
@@ -208,7 +211,11 @@ def test_every_button_sends_one_key_per_press():
             for widget_id in [w.id for w in pad.widgets if w.kind in ("page", "number")]:
                 tap(pad, clock, widget_id)
                 pressed = [code for kind, code, down in bridge.take() if kind == "key" and down and code not in modifiers]
-                assert len(pressed) == 1, (game, widget_id, pressed)
+                radial = next(w for w in pad.widgets if w.id == widget_id).data.radial
+                assert len(pressed) == (0 if radial else 1), (game, widget_id, pressed)
+                if radial:
+                    tap(pad, clock, widget_id)
+                    assert not bridge.take() and not pad.swipes
 
 
 def test_a_number_is_sent_when_the_finger_lifts():
@@ -328,6 +335,406 @@ def test_wow_targets_ignore_a_swipe_right():
     assert bridge.take() == [("key", 60, True), ("key", 60, False)]
 
 
+def slice_point(x, y, direction):
+    """Where a finger is over a slice, halfway out, of a radial centered at (x, y)."""
+    angle = pad_model.RADIAL_DIRECTIONS.index(direction) * math.pi / 4
+    reach = (pad_model.RADIAL_HUB + pad_model.radial_reach(x, y)) / 2
+    return x + reach * math.cos(angle), y + reach * math.sin(angle)
+
+
+def radial(pad, clock, direction, steps=5):
+    """Hold the Chat button and slide onto a slice, or stay put for None. Returns the slice the radial showed chosen. A
+    radial that stayed open is closed with a second tap on its button."""
+    tid = down(pad, clock, "page:chat")
+    x, y = center(pad, "page:chat")
+    tx, ty = slice_point(x, y, direction) if direction else (x, y)
+    for i in range(1, steps + 1):
+        clock.now += 0.02
+        pad.touch_move(tid, x + (tx - x) * i / steps, y + (ty - y) * i / steps, clock.now)
+    shown = pad.swipes.get("page:chat")
+    pad.touch_up(tid, clock.now)
+    clock.now += 0.5
+    if "page:chat" in pad.swipes:
+        tap(pad, clock, "page:chat")
+    return shown
+
+
+def test_the_utility_pages_pair_buttons_in_rows_of_the_same_height():
+    def rows(game):
+        widgets = [w for w in build_layout("pad", 2, game=game)[1] if w.kind == "page" and not w.data.radial]
+        assert {w.h for w in widgets} == {pad_model.PAGE_ROW_H}
+        return [[w.id[5:] for w in widgets if w.y == y] for y in sorted({w.y for w in widgets})]
+
+    assert rows(pad_model.WOW) == [["sheathe_weapons", "screenshot"], ["sit_stand"], ["chat_page_up", "chat_page_down"]]
+    assert rows(pad_model.FFXI) == [["macro_set_up", "macro_set_down"]]
+
+
+def test_a_page_of_rows_without_a_radial_fills_the_body_with_its_rows_level_across_the_columns():
+    panels, widgets = build_layout("pad", 0, game=pad_model.DESKTOP)
+    pages = [w for w in widgets if w.kind == "page"]
+    assert len({w.h for w in pages}) == 1 and pages[0].h > pad_model.PAGE_ROW_H
+    assert len({w.y for w in pages}) == 4
+    assert math.isclose(max(y + h for _, y, _, h, _ in panels), pad_model.BODY_Y + pad_model.BODY_H)
+
+
+def test_the_chat_button_is_round_and_in_the_middle_of_the_room_between_the_other_buttons():
+    below = {"wow": ["chat_page_up", "chat_page_down"], "ffxi": []}
+    for game in (pad_model.WOW, pad_model.FFXI):
+        panels, widgets = build_layout("pad", 2, game=game)
+        chat = next(w for w in widgets if w.id == "page:chat")
+        others = [w for w in widgets if w.kind == "page" and w is not chat]
+        assert chat.w == chat.h == 2 * pad_model.RADIAL_BUTTON_R
+        assert [w.id[5:] for w in others if w.y > chat.y] == below[game.id]
+        left = [(y, y + h) for x, y, w, h, _ in panels if x < chat.x]
+        top = max(end for start, end in left if start < chat.y) + pad_model.GAP
+        bottom = min((start - pad_model.GAP for start, end in left if start > chat.y),
+                     default=pad_model.BODY_Y + pad_model.BODY_H)
+        assert top < chat.y and chat.y + chat.h < bottom
+        assert abs((chat.y - top) - (bottom - chat.y - chat.h)) < 1
+        assert chat.center[0] == (min(w.x for w in others) + max(w.x + w.w for w in others)) / 2
+
+
+def test_a_radial_chooses_the_slice_under_the_finger():
+    choice = pad_model.radial_choice
+    assert choice(620, 540, 620, 540) is None and choice(620, 540, 690, 540) is None  # over the hub
+    for direction in pad_model.RADIAL_DIRECTIONS:
+        assert choice(620, 540, *slice_point(620, 540, direction)) == direction
+    assert pad_model.radial_reach(620, 540) == pad_model.RADIAL_REACH  # room all round
+
+
+def test_a_tap_on_the_chat_button_leaves_its_radial_open_for_the_next_finger():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    bridge.take()
+    landing = center(pad, "page:chat")
+    tid = 1000
+    pad.touch_down(tid, landing[0] + 100, landing[1], clock.now)  # on the button, over a slice
+    assert pad.radial_growth() == 0.0
+    pad.touch_move(tid, landing[0] + 130, landing[1] - 30, clock.now)  # a wobble chooses nothing
+    pad.touch_up(tid, clock.now)
+    assert "page:chat" in pad.swipes and pad.swipes["page:chat"] is None  # open, nothing chosen
+    clock.now += pad_model.RADIAL_OPEN_S + 0.01
+    assert pad.radial_growth() == 1.0
+    # The next finger is the radial's wherever it lands: on a slice, it chooses it at once.
+    tid = 1001
+    pad.touch_down(tid, *slice_point(*landing, "left"), clock.now)
+    assert pad.swipes["page:chat"] == "left"
+    pad.touch_move(tid, *slice_point(*landing, "up"), clock.now + 0.05)
+    assert pad.swipes["page:chat"] == "up"
+    pad.touch_up(tid, clock.now + 0.1)
+    assert [code for _, code, down in bridge.take() if down] == [53, 34, 57]  # "/g "
+    assert pad.view == "keyboard" and not pad.swipes
+    # Tapping the button's middle, or anywhere outside the radial, closes it and sends nothing.
+    for where in ("page:chat", "page:sit_stand", "number:slot_5"):
+        tap(pad, clock, "tab:2")
+        tap(pad, clock, "page:chat")
+        assert "page:chat" in pad.swipes
+        tap(pad, clock, where)
+        assert not pad.swipes and not bridge.take() and pad.view == "pad"
+
+
+def test_the_wow_chat_radial_types_the_channel_command_and_opens_the_keyboard_as_it_was():
+    buzzes = []
+    pad, bridge, clock = make(haptic=buzzes.append)
+    tap(pad, clock, "mode:keyboard")
+    tap(pad, clock, key_id(pad, "?123"))  # the keyboard was left on its symbols
+    tap(pad, clock, "tab:2")
+    bridge.take()
+    buzzes.clear()
+    assert radial(pad, clock, "up") == "up"
+    assert bridge.take() == [("key", 53, True), ("key", 53, False), ("key", 34, True), ("key", 34, False),
+                             ("key", 57, True), ("key", 57, False)]  # "/g ", and no Enter
+    hold, gap, opening = pad_model.TYPE_HOLD_S, pad_model.TYPE_GAP_S, pad_model.TYPE_OPEN_S
+    assert clock.slept[-6:] == [hold, opening, hold, gap, hold, gap]
+    assert buzzes == ["press", "tick"]
+    assert pad.view == "keyboard" and pad.kb_symbols and pad.kb_shift == "off" and not pad.key_refs
+    tap(pad, clock, "tab:2")
+    radial(pad, clock, "down_right")
+    assert [code for _, code, down in bridge.take() if down] == [53, 19, 30, 57]  # "/ra "
+
+
+def test_cancel_and_the_hub_on_the_chat_radial_send_nothing():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    bridge.take()
+    assert radial(pad, clock, "down") == "down"
+    assert bridge.take() == [] and pad.view == "pad" and not pad.swipes
+    tid = down(pad, clock, "page:chat")
+    landing = center(pad, "page:chat")
+    pad.touch_move(tid, *slice_point(*landing, "up"), clock.now)
+    pad.touch_move(tid, *landing, clock.now)  # and back onto the hub
+    assert pad.swipes["page:chat"] is None
+    pad.touch_up(tid, clock.now)
+    assert bridge.take() == [] and pad.view == "pad" and not pad.swipes
+    assert not pad.lit(next(w for w in pad.widgets if w.id == "page:chat"))
+
+
+def test_the_ffxi_chat_radial_sends_ffxis_own_keys_with_their_remaps():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:2")
+    bridge.take()
+    radial(pad, clock, "up_left")
+    assert bridge.take() == [("key", CTRL, True), ("key", 19, True), ("key", 19, False), ("key", CTRL, False)]
+    assert pad.view == "keyboard"
+    pad.apply_config({"game": "ffxi", "bindings": {"party_chat": 33}})  # remapped while it was a page button
+    tap(pad, clock, "tab:2")
+    radial(pad, clock, "up_right")
+    assert bridge.take() == [("key", CTRL, True), ("key", 33, True), ("key", 33, False), ("key", CTRL, False)]
+    tap(pad, clock, "tab:2")
+    assert radial(pad, clock, "right") == "right"  # an empty slice
+    assert bridge.take() == [] and pad.view == "pad"
+
+
+def test_the_chat_keyboard_comes_up_only_once_the_slices_keystroke_is_out():
+    pending = []
+    pad, bridge, clock = make(later=lambda delay, job: pending.append(job))
+    pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:2")
+    bridge.take()
+    radial(pad, clock, "up_left")
+    assert pad.view == "pad"  # Ctrl is still down: a letter typed now would be Ctrl and the letter
+    while pending:
+        pending.pop(0)()
+    assert bridge.take() == [("key", CTRL, True), ("key", 19, True), ("key", 19, False), ("key", CTRL, False)]
+    assert pad.view == "keyboard"
+    tap(pad, clock, "tab:2")
+    radial(pad, clock, "up_left")
+    tap(pad, clock, "mode:trackpad")  # the view changed before the keystroke was out: it stays changed
+    while pending:
+        pending.pop(0)()
+    assert pad.view == "trackpad"
+
+
+def test_the_radial_repaints_only_while_open_and_blooming():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    assert not pad.blooming()
+    tid = down(pad, clock, "page:chat")
+    assert pad.blooming()
+    pad.touch_up(tid, clock.now)  # a tap leaves it open
+    assert pad.blooming()
+    pad.touch_up(down(pad, clock, "page:chat"), clock.now)  # and a second closes it, before it has finished blooming
+    assert pad.radial_growth() < 1.0 and not pad.blooming()
+
+
+def test_a_finger_that_takes_over_a_chat_radial_from_a_lost_lift_holds_nothing_on_the_keyboard():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    tid = down(pad, clock, "page:chat")
+    pad.touch_move(tid, *slice_point(*center(pad, "page:chat"), "left"), clock.now)  # and its lift is lost
+    down(pad, clock, "page:chat")  # the lost finger's slice is sent, and the keyboard comes up
+    assert [code for _, code, down in bridge.take() if down] == [53, 31, 57]  # "/s "
+    assert pad.view == "keyboard" and not pad.pressed and not pad.swipes
+
+
+def test_a_radial_sends_nothing_if_its_button_goes_away():
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    tid = down(pad, clock, "page:chat")
+    pad.touch_move(tid, *slice_point(*center(pad, "page:chat"), "left"), clock.now)
+    tap(pad, clock, "mode:trackpad")  # another finger changes the view
+    pad.touch_up(tid, clock.now)
+    assert bridge.take() == [] and pad.view == "trackpad" and not pad.swipes
+
+
+def test_every_chat_command_can_be_typed_and_never_presses_enter():
+    typed = [s for game in pad_model.GAMES.values() for b in game.buttons for _, s in b.radial if s.text]
+    assert typed
+    for slot in typed:
+        assert all(ch in pad_model.TYPED for ch in slot.text) and "\n" not in slot.text, slot.id
+        assert slot.text.startswith("/") and slot.text.endswith(" "), slot.id
+    assert all(pad_model.RADIAL_CANCEL not in dict(b.radial) for game in pad_model.GAMES.values() for b in game.buttons)
+
+
+# ---------------------------------------------------------------------- the Desktop profile
+
+def two_fingers(pad, clock, moves, start_gap=200.0):
+    """Two fingers land on the trackpad, side by side, and each step moves them by (dx_a, dy_a, dx_b, dy_b) in all."""
+    x, y = center(pad, "surface")
+    a, b = (x - start_gap / 2, y), (x + start_gap / 2, y)
+    pad.touch_down(901, *a, clock.now)
+    pad.touch_down(902, *b, clock.now)
+    for i in range(1, 11):
+        clock.now += 0.02
+        dxa, dya, dxb, dyb = (v * i / 10 for v in moves)
+        pad.touch_move(901, a[0] + dxa, a[1] + dya, clock.now)
+        pad.touch_move(902, b[0] + dxb, b[1] + dyb, clock.now)
+        pad.frame_done()
+    clock.now += 0.02
+    pad.touch_up(901, clock.now)
+    pad.touch_up(902, clock.now)
+    clock.now += 0.5
+
+
+def test_the_desktop_pages_take_the_whole_width_and_back_copy_paste_and_forward_replace_the_modifiers():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    assert pad.game.titles == ("Edit", "Browser")
+    assert not [w for w in pad.widgets if w.kind == "number"]
+    page = {w.id: w for w in pad.widgets if w.kind == "page"}
+    # Navigate's buttons stand right of Edit's, where the number block was.
+    assert page["page:undo"].y == page["page:esc"].y and page["page:redo"].x < page["page:esc"].x
+    assert page["page:delete"].x + page["page:delete"].w > pad_model.W - 2 * pad_model.MARGIN
+    tap(pad, clock, "page:esc")
+    assert bridge.take() == [("key", 1, True), ("key", 1, False)]
+    tap(pad, clock, "mode:trackpad")
+    assert not [w for w in pad.widgets if w.kind == "mod"]
+    assert [w.label for w in sorted(pad.widgets, key=lambda w: w.x) if w.kind == "page"] == [
+        "Back", "Copy", "Paste", "Forward"]
+    for widget_id, key, mod in (("back", 105, ALT), ("copy", 46, CTRL), ("paste", 47, CTRL), ("forward", 106, ALT)):
+        tap(pad, clock, f"page:{widget_id}")
+        assert bridge.take() == [("key", mod, True), ("key", key, True), ("key", key, False), ("key", mod, False)]
+    pad.apply_config({"game": "wow"})
+    assert [w.label for w in pad.widgets if w.kind == "mod"] == ["Shift", "Ctrl", "Alt"]
+
+
+def test_desktop_shortcuts_that_harm_when_repeated_send_one_keystroke_however_long_the_finger_stays():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop", "bindings": {"close_tab": "ctrl+shift+17"}})
+    pad.page = 1
+    pad._relayout()
+    bridge.take()
+    tid = down(pad, clock, "page:close_tab")
+    assert bridge.take() == [("key", SHIFT, True), ("key", CTRL, True), ("key", 17, True), ("key", 17, False),
+                             ("key", CTRL, False), ("key", SHIFT, False)]  # let go at once, remapped
+    assert pad.lit(next(w for w in pad.widgets if w.id == "page:close_tab"))
+    clock.now += 2
+    pad.touch_up(tid, clock.now)
+    assert bridge.take() == [] and not pad.key_refs
+    pad.page = 0
+    pad._relayout()
+    tid = down(pad, clock, "page:undo")  # the rest are held, so they repeat
+    assert bridge.take() == [("key", CTRL, True), ("key", 44, True)]
+    pad.touch_up(tid, clock.now + 2)
+    bridge.take()
+    tap(pad, clock, "mode:trackpad")
+    tid = down(pad, clock, "page:paste")
+    assert bridge.take() == [("key", CTRL, True), ("key", 47, True), ("key", 47, False), ("key", CTRL, False)]
+    pad.touch_up(tid, clock.now + 2)
+    once = {s.id for s in pad_model.DESKTOP.controls if s.once}
+    assert once == {"paste", "save", "reload", "new_tab", "close_tab", "reopen_tab", "bookmark", "close_window",
+                    "full_screen", "screenshot"}
+    assert not [s for g in (pad_model.WOW, pad_model.FFXI) for s in g.controls if s.once]
+
+
+def test_the_desktop_keyboard_has_f_keys_super_and_arrows_in_place_of_its_trackpad():
+    pad, bridge, clock = make()
+    tap(pad, clock, "mode:keyboard")
+    assert [w for w in pad.widgets if w.kind == "surface"]  # the games keep the small trackpad
+    pad.apply_config({"game": "desktop"})  # the keyboard stays up, laid out for the desktop
+    assert pad.view == "keyboard" and not [w for w in pad.widgets if w.kind == "surface"]
+    top = [w for w in pad.widgets if w.id.startswith("key:top:")]
+    keyboard = [w for w in pad.widgets if w.kind == "key" and w not in top]
+    assert max(w.y + w.h for w in top) < min(w.y for w in keyboard)
+    _, wow = build_layout("keyboard", 0, game=pad_model.WOW)
+    assert [(w.x, w.y, w.w, w.h) for w in keyboard] == [(w.x, w.y, w.w, w.h) for w in wow if w.kind == "key"]
+    fkeys = [w for w in top if w.label.startswith("F")]
+    assert [w.label for w in fkeys] == [f"F{i}" for i in range(1, 13)]
+    assert len({w.y for w in fkeys}) == 2 and len({w.x for w in fkeys}) == 6
+    arrows = {w.data.icon: w for w in top if w.data.icon}
+    assert arrows["up"].x == arrows["down"].x and arrows["up"].y < arrows["down"].y
+    assert arrows["left"].y == arrows["down"].y == arrows["right"].y
+    assert max(w.x for w in fkeys) < arrows["left"].x < arrows["down"].x < arrows["right"].x
+    for label, key in (("F4", 62), ("F12", 88), ("Super", 125)):
+        tap(pad, clock, key_id(pad, label))
+        assert bridge.take() == [("key", key, True), ("key", key, False)]
+    for name, key in (("up", 103), ("left", 105), ("down", 108), ("right", 106)):
+        tap(pad, clock, arrows[name].id)
+        assert bridge.take() == [("key", key, True), ("key", key, False)]
+
+
+def test_the_desktop_media_radial_sends_its_key_and_stays_on_the_page():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "tab:1")
+    bridge.take()
+    landing = center(pad, "page:media")
+    tid = down(pad, clock, "page:media")
+    pad.touch_move(tid, *slice_point(*landing, "up"), clock.now)
+    pad.touch_up(tid, clock.now)
+    assert bridge.take() == [("key", 164, True), ("key", 164, False)]  # play / pause
+    assert pad.view == "pad" and pad.page == 1 and not pad.swipes
+    media = next(w for w in pad.widgets if w.id == "page:media").data
+    assert {d: slot.icon for d, slot in media.radial} == {
+        "up": "play_pause", "up_left": "previous", "up_right": "next", "left": "volume_down", "right": "volume_up",
+        "down_left": "mute"}
+
+
+def test_a_pinch_on_the_desktop_trackpad_zooms_with_ctrl_and_the_wheel():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "mode:trackpad")
+    bridge.take()
+    two_fingers(pad, clock, (-70, 0, 70, 0))  # 140 px further apart: two steps in
+    notch = pad_model.HI_RES_NOTCH
+    assert bridge.take() == [("key", CTRL, True), ("scroll", 0, notch), ("scroll", 0, notch), ("key", CTRL, False)]
+    two_fingers(pad, clock, (35, 0, -35, 0), start_gap=300)  # 70 px closer: one step out, and no right click
+    assert bridge.take() == [("key", CTRL, True), ("scroll", 0, -notch), ("key", CTRL, False)]
+    assert not pad.key_refs and pad.pair is None
+
+
+def test_two_fingers_on_the_desktop_trackpad_still_scroll_and_tap_a_right_click():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "mode:trackpad")
+    bridge.take()
+    two_fingers(pad, clock, (0, 150, 0, 150))
+    events = bridge.take()
+    assert events and {e[0] for e in events} == {"scroll"} and all(dy < 0 for _, _, dy in events)  # down
+    x, y = center(pad, "surface")
+    pad.touch_down(911, x - 100, y, clock.now)
+    pad.touch_down(912, x + 100, y, clock.now)
+    pad.touch_up(911, clock.now + 0.05)
+    pad.touch_up(912, clock.now + 0.05)
+    assert bridge.take() == [("btn", BTN_RIGHT, True), ("btn", BTN_RIGHT, False)]
+    two_fingers(pad, clock, (-300, 0, -300, 0))  # sideways scrolls sideways
+    events = bridge.take()
+    assert events and {e[0] for e in events} == {"scroll"} and all(dx < 0 and not dy for _, dx, dy in events)
+
+
+def test_a_pinch_lets_go_of_ctrl_when_the_view_changes_or_a_finger_is_lost():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "mode:trackpad")
+    x, y = center(pad, "surface")
+    for end in ("view", "lost"):
+        bridge.take()
+        pad.touch_down(921, x - 100, y, clock.now)
+        pad.touch_down(922, x + 100, y, clock.now)
+        pad.touch_move(921, x - 160, y, clock.now + 0.02)  # one finger moves, the other stays put
+        pad.frame_done()
+        assert bridge.take() == [("key", CTRL, True), ("scroll", 0, pad_model.HI_RES_NOTCH)]
+        if end == "view":
+            tap(pad, clock, "mode:keyboard")
+            tap(pad, clock, "mode:trackpad")
+        else:
+            pad.expire(clock.now + 0.02 + pad_model.STALE_CONTACT_S + 0.1)
+        assert ("key", CTRL, False) in bridge.take() and not pad.key_refs and pad.pair is None
+        pad.all_lifted(clock.now)
+        clock.now += 3
+
+
+def test_a_third_finger_on_the_trackpad_ends_a_pinch_so_it_clicks_without_ctrl():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "mode:trackpad")
+    x, y = center(pad, "surface")
+    bridge.take()
+    pad.touch_down(931, x - 100, y, clock.now)
+    pad.touch_down(932, x + 100, y, clock.now)
+    pad.touch_move(931, x - 160, y, clock.now + 0.02)
+    pad.frame_done()
+    assert bridge.take() == [("key", CTRL, True), ("scroll", 0, pad_model.HI_RES_NOTCH)]
+    pad.touch_down(933, x, y + 150, clock.now + 0.04)
+    assert bridge.take() == [("key", CTRL, False)] and not pad.key_refs
+    pad.touch_move(931, x - 300, y, clock.now + 0.06)  # the pinch's fingers zoom no more
+    pad.frame_done()
+    assert bridge.take() == []
+    pad.all_lifted(clock.now + 0.1)
+    assert pad.pair is None
+
+
 def test_changing_the_game_lets_go_and_keeps_the_page_when_it_can():
     pad, bridge, clock = make()
     tap(pad, clock, "tab:2")
@@ -335,7 +742,7 @@ def test_changing_the_game_lets_go_and_keeps_the_page_when_it_can():
     assert bridge.take() == [("key", 44, True)]
     pad.apply_config({"game": "ffxi"})
     assert bridge.take() == [("key", 44, False)] and pad.page == 2
-    assert "page:auto_run" in {w.id for w in pad.widgets} and "page:sheathe_weapons" not in {w.id for w in pad.widgets}
+    assert "page:macro_set_up" in {w.id for w in pad.widgets} and "page:sheathe_weapons" not in {w.id for w in pad.widgets}
     pad.touch_up(tid, clock.now)
     assert bridge.take() == []
     pad.apply_config({"game": "nonsense"})
@@ -865,7 +1272,7 @@ def test_the_decky_panel_lists_the_same_controls_and_default_keys():
         js = f.read()
     for game in pad_model.GAMES.values():
         listed = json.loads(re.sub(r"(\w+):", r'"\1":', re.search(rf"const {game.id}Defaults=(\{{.*?\}});", js).group(1)))
-        slots = [s for _, page in game.pages for s in page] + list(pad_model.NUMBER_SLOTS)
+        slots = game.controls
         assert listed == {s.id: s.key for s in slots}, game.id
     swipes = dict(re.findall(r'(\w+):\{name:"[^"]+",short:"[^"]+",defaults:\w+,mods:\w+,swipes:\[("\w+","\w+")\]', js))
     assert swipes == {g.id: f'"{g.swipes["up"][0]}","{g.swipes["down"][0]}"' for g in pad_model.GAMES.values()}
@@ -874,6 +1281,12 @@ def test_the_decky_panel_lists_the_same_controls_and_default_keys():
     import main
 
     assert main.GAMES == tuple(pad_model.GAMES)
+
+
+def test_every_control_is_listed_once():
+    for game in pad_model.GAMES.values():
+        ids = [s.id for s in game.controls]
+        assert len(ids) == len(set(ids)), game.id
 
 
 def test_the_decky_key_picker_names_every_default_key_and_knows_the_default_modifiers():
@@ -887,7 +1300,7 @@ def test_the_decky_key_picker_names_every_default_key_and_knows_the_default_modi
     assert len(codes) == len(set(codes)) and all(0 < code < 248 for code in codes)
     names_of = {code: name for name, _, code in pad_model.MODIFIERS}
     for game in pad_model.GAMES.values():
-        slots = [s for _, page in game.pages for s in page] + list(pad_model.NUMBER_SLOTS)
+        slots = game.controls
         assert {s.key for s in slots} <= set(codes), game.id
         mods = json.loads(re.sub(r"(\w+):", r'"\1":', re.search(rf"const {game.id}Mods=(\{{.*?\}});", js).group(1)))
         assert mods == {s.id: [names_of[m] for m in s.mods] for s in slots if s.mods}, game.id
@@ -1554,6 +1967,19 @@ def test_every_swipe_fan_stays_on_the_screen():
             assert 0 <= end_x <= pad_model.W and 0 <= end_y <= pad_model.H, (w.id, swipe)
             assert reach > 100, (w.id, swipe)  # room for at least a short fan with its lettering
 
+def test_an_open_radial_is_whole_on_the_screen_and_reaches_past_its_button():
+    for game in pad_model.GAMES.values():
+        for page in range(len(game.pages)):
+            for w in build_layout("pad", page, game=game)[1]:
+                if w.kind != "page" or not w.data.radial:
+                    continue
+                cx, cy = w.center
+                reach = pad_model.radial_reach(cx, cy)
+                outer = reach + pad_model.RADIAL_GROW
+                assert outer <= cx <= pad_model.W - outer and outer <= cy <= pad_model.H - outer, game.id
+                assert reach > w.w / 2 + 120, (game.id, reach)
+
+
 def test_every_bundled_font_is_used_by_a_theme_and_ships_with_its_license():
     pad_draw = painter()
     folder = os.path.join(ROOT, "driver", "fonts")
@@ -1596,9 +2022,24 @@ def test_every_view_paints():
         pad_draw.paint(Context(), pad)
         tap(pad, clock, key_id(pad, "?123"))
         pad_draw.paint(Context(), pad)
+        tap(pad, clock, "tab:2")
+        tid = down(pad, clock, "page:chat")
+        pad_draw.paint(Context(), pad)  # open, nothing chosen
+        clock.now += pad_model.RADIAL_OPEN_S / 2
+        pad_draw.paint(Context(), pad)  # half grown out of its button
+        clock.now += pad_model.RADIAL_OPEN_S
+        for direction in ("down", "up_left"):  # Cancel, then a channel
+            pad.touch_move(tid, *slice_point(*center(pad, "page:chat"), direction), clock.now)
+            pad_draw.paint(Context(), pad)
+        pad.release_everything()
 
     pad, bridge, clock = make()
     pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:2")
+    tid = down(pad, clock, "page:chat")
+    pad.touch_move(tid, *slice_point(*center(pad, "page:chat"), "right"), clock.now)  # an empty slice
+    pad_draw.paint(Context(), pad)
+    pad.release_everything()
     for target, dy in (("tab:0", -90), ("tab:1", 90), ("tab:2", 0)):
         tap(pad, clock, target)
         tid = down(pad, clock, "number:slot_1")
@@ -1610,6 +2051,17 @@ def test_every_view_paints():
     tid = down(pad, clock, "page:party_5")
     x, y = center(pad, "page:party_5")
     pad.touch_move(tid, x + 90, y, clock.now)  # its Enter fan is painted
+    pad_draw.paint(Context(), pad)
+
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    for target in ("tab:0", "tab:1", "mode:trackpad", "mode:keyboard"):
+        tap(pad, clock, target)
+        pad_draw.paint(Context(), pad)
+    tap(pad, clock, "tab:1")
+    tid = down(pad, clock, "page:media")
+    clock.now += pad_model.RADIAL_OPEN_S
+    pad.touch_move(tid, *slice_point(*center(pad, "page:media"), "down_left"), clock.now)
     pad_draw.paint(Context(), pad)
 
 

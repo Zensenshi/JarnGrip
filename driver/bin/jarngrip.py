@@ -51,6 +51,7 @@ BACKGROUNDS = Path.home() / "Pictures/JarnGrip"
 LOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "jarngrip.lock"
 RESTORE_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada-bottom-screen.service"))
 TOUCH_RETRY_S = 3
+RADIAL_FRAME_MS = 16  # repaints while a radial blooms
 
 
 def load_config() -> dict:
@@ -232,6 +233,8 @@ class PadApp:
         try:
             # Not under the lock: painting only reads the pad's state, and a touch must never wait for a repaint.
             pad_draw.paint(cr, self.pad)
+            if self.pad.blooming():
+                GLib.timeout_add(RADIAL_FRAME_MS, self._redraw)  # a radial is still blooming
         except Exception as err:
             self._log_error(DebugCode.ERR_CAIRO_RENDER, f"{type(err).__name__}: {err}")
         return False
@@ -422,6 +425,7 @@ class PadApp:
                             else f"({x:.0f}, {y:.0f}) on {where}")
         for tid, x, y in frame.moves:
             pad.touch_move(tid, x, y, frame.ts)
+        pad.frame_done()
         if frame.live == 0 and not frame.downs:
             pad.all_lifted(frame.ts)
 

@@ -6,7 +6,7 @@ JarnGrip is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) 
 
 ## Features
 
-- **Pages** of buttons for the game's default keys, for **WoW** or **FFXI** (picked in Decky).
+- **Pages** of buttons for the game's default keys, for **WoW** or **FFXI**, or a **Desktop** profile for the desktop and the web (picked in Decky).
 - **Number pad** with swipes: Shift and Ctrl for WoW's action bars, Ctrl and Alt for FFXI's two macro bars.
 - **Trackpad** and **keyboard**, one tap away.
 - **Four themes**: Classic, Charcoal, Dark, and Game Glass over a picture of your choice.
@@ -43,7 +43,11 @@ Two tips:
 - **Previous enemy opens the Steam menu?** WoW's default for it, Shift+Tab, is also Steam's overlay shortcut. Bind it to Ctrl+Tab in WoW and remap it in Decky.
 - **Keys act as if Shift is held?** Tap **Unstick keys** in the settings.
 
-In FFXI, swipe a party target (Self, Party 1 to 5) **right** to press Enter after it, which casts a `<stpt>` spell on that member. Otherwise every button sends one key per press, never a sequence. For emotes, make a WoW macro and put it on an action bar.
+In FFXI, swipe a party target (Self, Party 1 to 5) **right** to press Enter after it, which casts a `<stpt>` spell on that member.
+
+**Chat**, the round button on the Utility page, opens a radial of chat channels: slide onto one and lift, or tap **Chat** and then tap a channel, and the chat box opens on that channel with the keyboard ready. The red slice at the bottom cancels. In WoW, which has no key per channel, the pad types the channel's command (`/g `, `/p `, …) but never presses Enter, so nothing is said until you send it. Otherwise every button sends one key per press, never a sequence. For emotes, make a WoW macro and put it on an action bar.
+
+The **Desktop** profile is for everything that is not a game. Its two pages, Edit and Browser, hold the usual editing, navigation, browser and window shortcuts across the whole width, and a **Media** radial. Its keyboard has F1 to F12, Super and the arrow keys above the letters, in place of the small trackpad. On its trackpad, **Back**, **Copy**, **Paste** and **Forward** take the place of Shift, Ctrl and Alt, and you can **pinch** to zoom.
 
 More in the [guide](docs/guide.md).
 

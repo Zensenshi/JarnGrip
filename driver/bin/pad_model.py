@@ -6,14 +6,24 @@ second-screen pad of AYN-Thor-WoW-Launcher (https://github.com/wyattabuntjer/AYN
 
 - A page button is a real key: finger down presses it, finger up releases it, and several can be held at once. A few
   of FFXI's send one keystroke per touch instead (the macro sets), and its party targets press Enter after a swipe right.
+  So do the Desktop shortcuts that must not repeat while a thumb rests on them, such as Close tab, but at once.
 - A number button sends its key when the finger lifts, which lets a swipe change it: up and down add the game's two
   modifiers (Shift and Ctrl for WoW, Ctrl and Alt for FFXI's two macro bars), and left cancels it.
 - The trackpad's click buttons hold while pressed, so they drag; a double tap keeps one held until it is tapped again.
 - The trackpad view's Shift, Ctrl and Alt are armed by a tap (they let go after the next click), locked by a double
   tap, and cleared by a tap.
+- The round Chat button opens a radial of chat channels, which blooms out of its middle. Lifting on a slice opens that
+  channel's chat box and shows the keyboard; the slice at the bottom, or lifting in the middle, cancels. A tap leaves
+  the radial open for the next finger, which chooses a slice or, landing anywhere else, closes it. FFXI's slices are
+  its own chat keys. WoW has no key per channel, so its slices type the channel's command ("/g "), but never Enter:
+  nothing is said until the player sends it.
+- The Desktop profile, for everything that is not a game, has no number block: its pages take the whole width, two
+  columns each. Its keyboard has F1 to F12, Super and the arrows in place of its small trackpad, and its trackpad Back,
+  Copy, Paste and Forward in place of the modifiers, and pinch to zoom.
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -25,6 +35,7 @@ W, H = SCREEN_WIDTH, SCREEN_HEIGHT
 
 KEY_LEFTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT = 42, 29, 56
 KEY_ENTER = 28
+KEY_LEFT, KEY_RIGHT = 105, 106
 MODIFIERS = (("shift", "Shift", KEY_LEFTSHIFT), ("ctrl", "Ctrl", KEY_LEFTCTRL), ("alt", "Alt", KEY_LEFTALT))
 MOD_CODES = {name: code for name, _, code in MODIFIERS}
 
@@ -44,6 +55,23 @@ SWIPE_PX = 50.0             # finger travel on a number button that makes a pres
 MOD_LEAD_S = 0.3
 TAP_HOLD_S = 0.15
 CONFIRM_GAP_S = 0.1         # after a target button lets go, the wait before its swipe's Enter (Slot.confirm)
+# A chat command (Slot.text) is typed a key at a time: each held this long, with this long between them, and longer
+# after the first, the "/" that opens WoW's chat box, so the box is open before the letters arrive.
+TYPE_HOLD_S = 0.03
+TYPE_GAP_S = 0.03
+TYPE_OPEN_S = 0.12
+# The Chat button's radial: eight slices, clockwise from the right as screen angles run, around a hub in the middle of
+# the round button. The slices reach as far as the screen leaves room for. The bottom slice is always Cancel. The slice
+# under the finger is the one chosen, but a finger that landed on the button chooses nothing until it has moved
+# RADIAL_PX, so that a tap opens the radial, wherever on the button it lands.
+RADIAL_DIRECTIONS = ("right", "down_right", "down", "down_left", "left", "up_left", "up", "up_right")
+RADIAL_CANCEL = "down"
+RADIAL_PX = 60.0
+RADIAL_HUB = 80.0           # the hub's radius: lifting in it chooses nothing
+RADIAL_REACH = 320.0        # a slice's outer radius, where the screen leaves room
+RADIAL_GROW = 28.0          # how much further the chosen slice reaches
+RADIAL_BUTTON_R = 150.0     # the round button that opens a radial
+RADIAL_OPEN_S = 0.28        # how long a radial takes to bloom
 
 # Layout, in bottom-screen pixels.
 MARGIN = 16.0
@@ -56,15 +84,21 @@ MODE_W = 104.0
 STATUS_W = 150.0            # the clock and battery, between the page tabs and the mode buttons
 SINGLE_COLUMN_MAX = 8       # a page with more buttons than this splits into two columns
 NUMBER_TALL = 1.1           # a number key is at most this many times as tall as it is wide
+PAGE_ROW_H = 140.0          # a row of page buttons, on a page laid out in rows around a radial
 KEY_ROW_H = 140.0           # five rows low enough for thumbs; the space above them is a small trackpad
 MODES = ("settings", "trackpad", "keyboard")
 THEMES = (("classic", "Classic"), ("charcoal", "Charcoal"), ("dark", "Dark"), ("glass", "Game Glass"))  # see pad_draw.py
 OLD_THEME_IDS = {"steamos": "charcoal", "oled": "dark"}  # earlier names of themes, still accepted from a config
 THEME_IDS = tuple(theme for theme, _ in THEMES)
+# Two fingers on the trackpad, in a profile with gestures (Game.gestures), are held back from the gesture engine until
+# it is clear what they do: spreading apart or pinching together zooms, and anything else is the engine's own
+# two-finger scroll.
+GESTURE_PX = 24.0           # travel of the fingers, or change in the space between them, that decides
+PINCH_PX_PER_STEP = 60.0    # change in the space between the fingers per zoom step
 THEME_Y, THEME_H = 590.0, 112.0  # the theme buttons on the settings view
 
 # Label heights in pixels.
-TAB_TEXT, MOD_TEXT, MOUSE_TEXT, PAGE_TEXT, PAGE_SPLIT_TEXT, NUMBER_TEXT = 34, 36, 40, 40, 34, 68
+TAB_TEXT, MOD_TEXT, MOUSE_TEXT, PAGE_TEXT, PAGE_SPLIT_TEXT, NUMBER_TEXT, ROUND_TEXT = 34, 36, 40, 40, 34, 68, 56
 KEY_TEXT, KEY_WORD_TEXT = 52, 34  # a one-character key, and a key with a word on it
 
 
@@ -77,10 +111,61 @@ class Slot:
     mods: tuple = ()
     tap: bool = False       # one keystroke per touch, modifiers first, however long the finger stays: no key repeat
     confirm: bool = False   # a swipe right presses Enter after it: FFXI's party targets, to pick one for a <stpt> spell
+    text: str = ""          # typed key by key instead of the key: a WoW chat command such as "/g "
+    radial: tuple = ()      # (direction, Slot) per slice of the radial this button opens (RADIAL_DIRECTIONS)
+    keyboard: bool = False  # a radial whose slices open a chat box: the keyboard comes up after one is chosen
+    icon: str = ""          # drawn in place of the label, on a radial's slice
+    once: bool = False      # one keystroke per touch, let go at once: a held key would repeat (Close tab, Paste)
 
 
-def _page(label: str, key: int, *mods: int, tap: bool = False, confirm: bool = False) -> Slot:
-    return Slot(re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_"), label, key, mods, tap, confirm)
+def _id(label: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+
+
+def _page(label: str, key: int, *mods: int, tap: bool = False, confirm: bool = False, icon: str = "",
+          once: bool = False) -> Slot:
+    return Slot(_id(label), label, key, mods, tap, confirm, icon=icon, once=once)
+
+
+def _radial(label: str, keyboard: bool = False, **slices: Slot) -> Slot:
+    assert set(slices) <= set(RADIAL_DIRECTIONS) - {RADIAL_CANCEL}
+    return Slot(_id(label), label, 0, radial=tuple((d, slices[d]) for d in RADIAL_DIRECTIONS if d in slices),
+                keyboard=keyboard)
+
+
+def _typed(label: str, text: str) -> Slot:
+    """A radial slice that types a chat command. Its id is kept apart from the page buttons' (WoW has a Guild button)."""
+    return Slot(f"chat_{_id(label)}", label, 0, text=text)
+
+
+def _radial_in(entries: tuple) -> Slot | None:
+    """The radial button among a column's entries, if it has one."""
+    return next((e for e in entries if isinstance(e, Slot) and e.radial), None)
+
+
+def _row_of(entry: Slot | tuple) -> tuple:
+    """A page entry as a row of buttons: a lone button is a row of its own. None in a row leaves its cell empty."""
+    return entry if isinstance(entry, tuple) else (entry,)
+
+
+@dataclass(frozen=True)
+class KeySpec:
+    """One key of the on-screen keyboard."""
+    label: str = ""
+    shifted: str = ""
+    code: int = 0
+    weight: float = 1.0
+    letter: bool = False
+    action: str = "input"       # input, plain (never shifted), shift, symbols
+    send_shifted: bool = False  # symbol keys that type the shifted character
+    icon: str = ""
+
+
+# The number row: WoW's action bar 1, slots 1 to 12, or FFXI's macro palette with a swipe.
+NUMBER_SLOTS = tuple(
+    Slot(f"slot_{i + 1}", label, code)
+    for i, (label, code) in enumerate(zip(("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="), range(2, 14)))
+)
 
 
 @dataclass(frozen=True)
@@ -88,12 +173,30 @@ class Game:
     """A game the pad is laid out for: its page tabs and what a swipe up or down on a number adds."""
     id: str
     name: str
-    pages: tuple    # (title, (Slot, ...)) per page tab
+    pages: tuple    # (title, column, ...) per page tab, a column being (Slot or a row of Slots, ...)
     swipes: dict    # "up" / "down" -> (label, modifier key codes)
+    numbers: tuple = NUMBER_SLOTS  # the number block, right of the pages; () for none
+    trackpad: tuple = ()    # Slots in place of the trackpad's Shift, Ctrl and Alt
+    gestures: bool = False  # pinch to zoom on the trackpad (GESTURE_PX)
+    keyboard_top: tuple = ()  # rows of KeySpecs (None for a gap) above the keyboard, in place of its small trackpad
 
     @property
     def titles(self) -> tuple:
-        return tuple(title for title, _ in self.pages)
+        return tuple(title for title, *_ in self.pages)
+
+    @property
+    def buttons(self) -> tuple:
+        """Every page button, a row's included."""
+        return tuple(s for _, *columns in self.pages for column in columns for entry in column for s in _row_of(entry)
+                     if s)
+
+    @property
+    def controls(self) -> tuple:
+        """Every button a remap can change, the number row and a radial's key slices included. A radial button and a
+        typed slice send no key of their own, so they cannot be remapped."""
+        slots = list(self.buttons) + list(self.numbers) + list(self.trackpad)
+        slots = [inner for s in slots for inner in ([part for _, part in s.radial] if s.radial else [s])]
+        return tuple({s.id: s for s in slots if not s.text}.values())  # Desktop's trackpad reuses page buttons
 
 
 # WoW's default bindings, as Linux key codes.
@@ -108,9 +211,12 @@ WOW_PAGES = (
         _page("Next enemy", 15), _page("Previous enemy", 15, KEY_LEFTSHIFT),
     )),
     ("Utility", (
-        _page("Sheathe weapons", 44), _page("Auto-run", 69), _page("Walk / run", 98), _page("Sit / stand", 45),
-        _page("Hide UI", 44, KEY_LEFTALT), _page("Enemy nameplates", 47), _page("Friendly nameplates", 47, KEY_LEFTSHIFT),
-        _page("Chat page up", 104), _page("Chat page down", 109), _page("Screenshot", 99),
+        (_page("Sheathe weapons", 44), _page("Screenshot", 99)),
+        _page("Sit / stand", 45),
+        _radial("Chat", keyboard=True, up=_typed("Guild", "/g "), up_right=_typed("Party", "/p "), right=_typed("Yell", "/y "),
+                down_right=_typed("Raid", "/ra "), down_left=_typed("Instance", "/i "), left=_typed("Say", "/s "),
+                up_left=_typed("Whisper", "/w ")),
+        (_page("Chat page up", 104), _page("Chat page down", 109)),
     )),
 )
 
@@ -129,11 +235,14 @@ FFXI_PAGES = (
         _page("Nearest NPC", 66), _page("Nearest player", 67), _page("Lock target", 55),
         _page("Attack", 30, KEY_LEFTCTRL), _page("Check", 46, KEY_LEFTCTRL), _page("Ranged attack", 32, KEY_LEFTCTRL),
     )),
+    # The chat slices keep the ids they had as page buttons, so that their remaps still apply. They sit where WoW's
+    # nearest channels do: Linkshell for Guild, a tell for a whisper.
     ("Utility", (
-        _page("Auto-run", 71), _page("Rest", 35, KEY_LEFTCTRL), _page("Point of view", 47, KEY_LEFTCTRL),
-        _page("Macro set up", 103, KEY_LEFTCTRL, tap=True), _page("Macro set down", 108, KEY_LEFTCTRL, tap=True),
-        _page("Reply to tell", 19, KEY_LEFTCTRL), _page("Party chat", 25, KEY_LEFTCTRL),
-        _page("Linkshell chat", 38, KEY_LEFTCTRL), _page("Say", 31, KEY_LEFTCTRL),
+        (_page("Macro set up", 103, KEY_LEFTCTRL, tap=True), _page("Macro set down", 108, KEY_LEFTCTRL, tap=True)),
+        _radial("Chat", keyboard=True, up=Slot("linkshell_chat", "Linkshell", 38, (KEY_LEFTCTRL,), tap=True),
+                up_right=Slot("party_chat", "Party", 25, (KEY_LEFTCTRL,), tap=True),
+                left=Slot("say", "Say", 31, (KEY_LEFTCTRL,), tap=True),
+                up_left=Slot("reply_to_tell", "Reply", 19, (KEY_LEFTCTRL,), tap=True)),
     )),
 )
 
@@ -142,13 +251,58 @@ WOW = Game("wow", "World of Warcraft", WOW_PAGES,
 # FFXI's macro palette: Ctrl + 1 to 0 is its upper bar, Alt + 1 to 0 the lower one.
 FFXI = Game("ffxi", "Final Fantasy XI", FFXI_PAGES,
             {"up": ("Ctrl", (KEY_LEFTCTRL,)), "down": ("Alt", (KEY_LEFTALT,))})
-GAMES = {game.id: game for game in (WOW, FFXI)}
 
-# The number row: WoW's action bar 1, slots 1 to 12, or FFXI's macro palette with a swipe.
-NUMBER_SLOTS = tuple(
-    Slot(f"slot_{i + 1}", label, code)
-    for i, (label, code) in enumerate(zip(("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="), range(2, 14)))
+# Everything that is not a game: a browser, a file manager, an office program. The usual shortcuts of Linux desktops
+# and browsers, each still one key (with its modifiers) per press. Those that do harm when repeated are sent once per
+# touch: a thumb resting on Close tab must not close several.
+COPY = _page("Copy", 46, KEY_LEFTCTRL)
+PASTE = _page("Paste", 47, KEY_LEFTCTRL, once=True)
+BACK = _page("Back", KEY_LEFT, KEY_LEFTALT)
+FORWARD = _page("Forward", KEY_RIGHT, KEY_LEFTALT)
+# Two tabs of two columns each, over the whole width: the F keys and the arrows are on the keyboard instead.
+DESKTOP_PAGES = (
+    ("Edit", (
+        (_page("Undo", 44, KEY_LEFTCTRL), _page("Redo", 44, KEY_LEFTCTRL, KEY_LEFTSHIFT)),
+        (_page("Cut", 45, KEY_LEFTCTRL), COPY),
+        (PASTE, _page("Select all", 30, KEY_LEFTCTRL)),
+        (_page("Find", 33, KEY_LEFTCTRL), _page("Save", 31, KEY_LEFTCTRL, once=True)),
+    ), (
+        (_page("Esc", 1), _page("Delete", 111)),
+        (_page("Tab", 15), _page("Enter", 28)),
+        (_page("Home", 102), _page("End", 107)),
+        (_page("Page up", 104), _page("Page down", 109)),
+    )),
+    ("Browser", (
+        (BACK, FORWARD),
+        (_page("Reload", 63, once=True), _page("Address bar", 38, KEY_LEFTCTRL)),
+        (_page("New tab", 20, KEY_LEFTCTRL, once=True), _page("Close tab", 17, KEY_LEFTCTRL, once=True)),
+        (_page("Previous tab", 15, KEY_LEFTCTRL, KEY_LEFTSHIFT), _page("Next tab", 15, KEY_LEFTCTRL)),
+        (_page("Reopen tab", 20, KEY_LEFTCTRL, KEY_LEFTSHIFT, once=True), _page("Bookmark", 32, KEY_LEFTCTRL, once=True)),
+        (_page("Zoom out", 12, KEY_LEFTCTRL), _page("Zoom in", 13, KEY_LEFTCTRL)),
+    ), (
+        (_page("Switch window", 15, KEY_LEFTALT), _page("Close window", 62, KEY_LEFTALT, once=True)),
+        _page("Full screen", 87, once=True),
+        _radial("Media", up=_page("Play / pause", 164, icon="play_pause"),
+                up_left=_page("Previous", 165, icon="previous"), up_right=_page("Next", 163, icon="next"),
+                left=_page("Volume down", 114, icon="volume_down"), right=_page("Volume up", 115, icon="volume_up"),
+                down_left=_page("Mute", 113, icon="mute")),
+        (_page("Screenshot", 99, once=True), _page("Menu", 127)),
+    )),
 )
+# Above the keyboard: F1 to F12 in two rows on the left, and on the right, past a gap, Super and the arrows, Up above
+# Down. Ten cells to a row, so each key sits over one of the digits.
+_F_KEYS = [KeySpec(f"F{i + 1}", code=code, action="plain")
+           for i, code in enumerate((59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88))]
+DESKTOP_KEYBOARD_TOP = (
+    _F_KEYS[:6] + [None, KeySpec("Super", code=125, action="plain"), KeySpec(code=103, action="plain", icon="up"),
+                   None],
+    _F_KEYS[6:] + [None, KeySpec(code=KEY_LEFT, action="plain", icon="left"),
+                   KeySpec(code=108, action="plain", icon="down"), KeySpec(code=KEY_RIGHT, action="plain", icon="right")],
+)
+DESKTOP = Game("desktop", "Desktop", DESKTOP_PAGES,
+               {"up": ("Ctrl", (KEY_LEFTCTRL,)), "down": ("Alt", (KEY_LEFTALT,))}, numbers=(),
+               trackpad=(BACK, COPY, PASTE, FORWARD), gestures=True, keyboard_top=DESKTOP_KEYBOARD_TOP)
+GAMES = {game.id: game for game in (WOW, FFXI, DESKTOP)}
 
 
 def combo_for(slot: Slot, bindings: dict) -> tuple:
@@ -164,19 +318,6 @@ def combo_for(slot: Slot, bindings: dict) -> tuple:
         if key.isdigit() and 0 < int(key) < 248 and all(name in MOD_CODES for name in names):
             return int(key), tuple(code for name, code in MOD_CODES.items() if name in names)
     return slot.key, slot.mods
-
-
-@dataclass(frozen=True)
-class KeySpec:
-    """One key of the on-screen keyboard."""
-    label: str = ""
-    shifted: str = ""
-    code: int = 0
-    weight: float = 1.0
-    letter: bool = False
-    action: str = "input"       # input, plain (never shifted), shift, symbols
-    send_shifted: bool = False  # symbol keys that type the shifted character
-    icon: str = ""
 
 
 def _letters(text: str, first: int) -> list:
@@ -210,6 +351,8 @@ KEYBOARD_SYMBOLS = (
       KeySpec(code=105, weight=1.25, action="plain", icon="left"), KeySpec(code=108, weight=1.25, action="plain", icon="down"),
       KeySpec(code=103, weight=1.25, action="plain", icon="up"), KeySpec(code=106, weight=1.25, action="plain", icon="right")], 0.0),
 )
+# The unshifted characters a chat command (Slot.text) can use, and their keys.
+TYPED = {spec.label: spec.code for keys, _ in KEYBOARD_MAIN for spec in keys if spec.action == "input"} | {" ": 57}
 
 
 @dataclass
@@ -229,17 +372,67 @@ class Widget:
     def contains(self, x: float, y: float, slack: float = 0.0) -> bool:
         return self.x - slack <= x <= self.x + self.w + slack and self.y - slack <= y <= self.y + self.h + slack
 
+    @property
+    def center(self) -> tuple:
+        return self.x + self.w / 2, self.y + self.h / 2
+
 
 def _row(widgets: list, items: list, x: float, y: float, w: float, h: float, make: Callable) -> None:
-    """Lay items out left to right in equal cells; make(item, x, y, w, h) returns each widget."""
+    """Lay items out left to right in equal cells; make(item, x, y, w, h) returns each widget. None leaves a cell empty."""
     cell = (w - (len(items) - 1) * GAP) / len(items)
     for i, item in enumerate(items):
-        widgets.append(make(item, x + i * (cell + GAP), y, cell, h))
+        if item is not None:
+            widgets.append(make(item, x + i * (cell + GAP), y, cell, h))
 
 
 def _modifier_row(widgets: list, x: float, y: float, w: float, h: float) -> None:
     _row(widgets, list(MODIFIERS), x, y, w, h,
          lambda m, bx, by, bw, bh: Widget(f"mod:{m[0]}", "mod", bx, by, bw, bh, m[1], data=m[2], size=MOD_TEXT))
+
+
+def _page_column(panels: list, widgets: list, entries: tuple, x: float, w: float, row_h: float) -> None:
+    """One column of a page's buttons, w wide at x, top to bottom of the body; a row of them is row_h high."""
+    radial = _radial_in(entries)
+
+    def page_button(slot: Slot, bx: float, by: float, bw: float, bh: float, narrow: bool) -> Widget:
+        return Widget(f"page:{slot.id}", "page", bx, by, bw, bh, slot.label, data=slot,
+                      size=PAGE_SPLIT_TEXT if narrow else PAGE_TEXT, wrap=narrow)
+
+    if radial or any(isinstance(e, tuple) for e in entries):
+        # A column with rows: each row row_h high, its buttons side by side. The rows after a radial go at the
+        # bottom, and its round button in the middle of the room left between them.
+        room_top, room_bottom = BODY_Y, BODY_Y + BODY_H
+        cut = entries.index(radial) if radial else len(entries)
+        for group, top in ((entries[:cut], True), (entries[cut + 1:], False)):
+            if not group:
+                continue
+            group_h = 2 * PANEL_PAD + len(group) * row_h + (len(group) - 1) * GAP
+            gy = BODY_Y if top else BODY_Y + BODY_H - group_h
+            panels.append((x, gy, w, group_h, False))
+            for ri, entry in enumerate(group):
+                row = _row_of(entry)
+                narrow = len(row) > 1
+                _row(widgets, list(row), x + PANEL_PAD, gy + PANEL_PAD + ri * (row_h + GAP), w - 2 * PANEL_PAD,
+                     row_h, lambda s, bx, by, bw, bh: page_button(s, bx, by, bw, bh, narrow))
+            if top:
+                room_top = gy + group_h + GAP
+            else:
+                room_bottom = gy - GAP
+        if radial:
+            bx, by = x + w / 2, (room_top + room_bottom) / 2
+            widgets.append(Widget(f"page:{radial.id}", "page", bx - RADIAL_BUTTON_R, by - RADIAL_BUTTON_R,
+                                  2 * RADIAL_BUTTON_R, 2 * RADIAL_BUTTON_R, radial.label, data=radial, size=ROUND_TEXT))
+    else:
+        split = len(entries) > SINGLE_COLUMN_MAX
+        columns = [entries[: (len(entries) + 1) // 2], entries[(len(entries) + 1) // 2:]] if split else [entries]
+        col_w = (w - (len(columns) - 1) * GAP) / len(columns)
+        for ci, column in enumerate(columns):
+            px = x + ci * (col_w + GAP)
+            panels.append((px, BODY_Y, col_w, BODY_H, False))
+            bh = (BODY_H - 2 * PANEL_PAD - (len(column) - 1) * GAP) / len(column)
+            for ri, slot in enumerate(column):
+                widgets.append(page_button(slot, px + PANEL_PAD, BODY_Y + PANEL_PAD + ri * (bh + GAP),
+                                           col_w - 2 * PANEL_PAD, bh, split))
 
 
 def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) -> tuple:
@@ -267,7 +460,11 @@ def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) 
         # The strip comes first: it lies on the surface's right edge and must win the hit test.
         widgets.append(Widget("strip", "strip", W - MARGIN - 8 - 64, BODY_Y + 8, 64, surface_h - 16))
         widgets.append(Widget("surface", "surface", MARGIN, BODY_Y, full_w, surface_h))
-        _modifier_row(widgets, MARGIN, mod_y, full_w, mod_h)
+        if game.trackpad:
+            _row(widgets, list(game.trackpad), MARGIN, mod_y, full_w, mod_h,
+                 lambda s, bx, by, bw, bh: Widget(f"page:{s.id}", "page", bx, by, bw, bh, s.label, data=s, size=MOD_TEXT))
+        else:
+            _modifier_row(widgets, MARGIN, mod_y, full_w, mod_h)
         _row(widgets, [("left", "Left click", BTN_LEFT), ("right", "Right click", BTN_RIGHT)], MARGIN, click_y, full_w, click_h,
              lambda b, bx, by, bw, bh: Widget(f"mouse:{b[0]}", "mouse", bx, by, bw, bh, b[1], data=b[2], size=MOUSE_TEXT))
     elif view == "keyboard":
@@ -276,7 +473,16 @@ def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) 
         kb_h = len(KEYBOARD_MAIN) * KEY_ROW_H
         top = BODY_Y + BODY_H - kb_h
         row_h = kb_h / len(rows)
-        widgets.append(Widget("surface", "surface", MARGIN, BODY_Y, full_w, top - GAP / 2 - BODY_Y))
+        if game.keyboard_top:
+            # The game's own keys take the room above the keyboard, in equal cells.
+            top_h = (top - BODY_Y) / len(game.keyboard_top)
+            for r, keys in enumerate(game.keyboard_top):
+                _row(widgets, [None if spec is None else (c, spec) for c, spec in enumerate(keys)], MARGIN,
+                     BODY_Y + r * top_h + GAP / 2, full_w, top_h - GAP,
+                     lambda k, bx, by, bw, bh, r=r: Widget(f"key:top:{r}:{k[0]}", "key", bx, by, bw, bh, k[1].label,
+                                                           data=k[1]))
+        else:
+            widgets.append(Widget("surface", "surface", MARGIN, BODY_Y, full_w, top - GAP / 2 - BODY_Y))
         for r, (keys, indent) in enumerate(rows):
             unit = (full_w - (len(keys) - 1) * GAP) / (sum(k.weight for k in keys) + 2 * indent)
             x = MARGIN + indent * unit
@@ -291,31 +497,32 @@ def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) 
         _row(widgets, [("unstick", "Unstick keys"), ("close", "Close pad")], MARGIN + 200, BODY_Y + BODY_H - 136,
              full_w - 400, 128, lambda b, bx, by, bw, bh: Widget(b[0], b[0], bx, by, bw, bh, b[1], size=MOUSE_TEXT))
     else:
-        half_w = (full_w - GAP) / 2
-        slots = game.pages[page][1]
-        split = len(slots) > SINGLE_COLUMN_MAX
-        columns = [slots[: (len(slots) + 1) // 2], slots[(len(slots) + 1) // 2:]] if split else [slots]
-        col_w = (half_w - (len(columns) - 1) * GAP) / len(columns)
-        for ci, column in enumerate(columns):
-            px = MARGIN + ci * (col_w + GAP)
-            panels.append((px, BODY_Y, col_w, BODY_H, False))
-            bh = (BODY_H - 2 * PANEL_PAD - (len(column) - 1) * GAP) / len(column)
-            for ri, slot in enumerate(column):
-                widgets.append(Widget(f"page:{slot.id}", "page", px + PANEL_PAD, BODY_Y + PANEL_PAD + ri * (bh + GAP),
-                                      col_w - 2 * PANEL_PAD, bh, slot.label, data=slot,
-                                      size=PAGE_SPLIT_TEXT if split else PAGE_TEXT, wrap=split))
-        # Right half: the number block, centered top to bottom. Swipes give it the game's modifiers, so it needs no
-        # modifier row.
-        rx = MARGIN + half_w + GAP
-        key_w = (half_w - 2 * PANEL_PAD - 2 * GAP) / 3
-        row_h = min((BODY_H - 2 * PANEL_PAD - 3 * GAP) / 4, key_w * NUMBER_TALL)
-        num_h = 4 * row_h + 3 * GAP + 2 * PANEL_PAD
-        num_y = BODY_Y + (BODY_H - num_h) / 2
-        panels.append((rx, num_y, half_w, num_h, True))
-        for r in range(4):
-            _row(widgets, list(NUMBER_SLOTS[r * 3: r * 3 + 3]), rx + PANEL_PAD, num_y + PANEL_PAD + r * (row_h + GAP),
-                 half_w - 2 * PANEL_PAD, row_h,
-                 lambda s, bx, by, bw, bh: Widget(f"number:{s.id}", "number", bx, by, bw, bh, s.label, data=s, size=NUMBER_TEXT))
+        # The page's columns side by side, and the number block, if the game has one, right of them.
+        columns = game.pages[page][1:]
+        count = len(columns) + (1 if game.numbers else 0)
+        col_w = (full_w - (count - 1) * GAP) / count
+        # A page with a radial keeps its rows PAGE_ROW_H high, to leave the round button room. One without shares the
+        # body's height between its longest column's rows, so that its rows still line up across the columns.
+        row_h = PAGE_ROW_H
+        if not any(_radial_in(entries) for entries in columns):
+            most = max(len(entries) for entries in columns)
+            row_h = (BODY_H - 2 * PANEL_PAD - (most - 1) * GAP) / most
+        for ci, entries in enumerate(columns):
+            _page_column(panels, widgets, entries, MARGIN + ci * (col_w + GAP), col_w, row_h)
+        if game.numbers:
+            # The number block, centered top to bottom. Swipes give it the game's modifiers, so it needs no
+            # modifier row.
+            rx = MARGIN + len(columns) * (col_w + GAP)
+            key_w = (col_w - 2 * PANEL_PAD - 2 * GAP) / 3
+            row_h = min((BODY_H - 2 * PANEL_PAD - 3 * GAP) / 4, key_w * NUMBER_TALL)
+            num_h = 4 * row_h + 3 * GAP + 2 * PANEL_PAD
+            num_y = BODY_Y + (BODY_H - num_h) / 2
+            panels.append((rx, num_y, col_w, num_h, True))
+            for r in range(4):
+                _row(widgets, list(game.numbers[r * 3: r * 3 + 3]), rx + PANEL_PAD,
+                     num_y + PANEL_PAD + r * (row_h + GAP), col_w - 2 * PANEL_PAD, row_h,
+                     lambda s, bx, by, bw, bh: Widget(f"number:{s.id}", "number", bx, by, bw, bh, s.label, data=s,
+                                                      size=NUMBER_TEXT))
     return panels, widgets
 
 
@@ -335,6 +542,20 @@ def confirms(dx: float, dy: float) -> bool:
     return dx > SWIPE_PX and dx >= abs(dy)
 
 
+def radial_reach(cx: float, cy: float) -> float:
+    """How far the slices of a radial centered at (cx, cy) reach: RADIAL_REACH, or less where it would not be whole on
+    the screen, its chosen slice included."""
+    return min(RADIAL_REACH, min(cx, W - cx, cy, H - cy) - RADIAL_GROW - MARGIN / 2)
+
+
+def radial_choice(cx: float, cy: float, x: float, y: float) -> str | None:
+    """The slice of a radial (RADIAL_DIRECTIONS) centered at (cx, cy) under a finger at (x, y), or None over the hub."""
+    dx, dy = x - cx, y - cy
+    if math.hypot(dx, dy) <= RADIAL_HUB:
+        return None
+    return RADIAL_DIRECTIONS[round(math.atan2(dy, dx) / (math.pi / 4)) % len(RADIAL_DIRECTIONS)]
+
+
 @dataclass
 class Touch:
     widget: Widget | None   # where the finger landed; it keeps that owner until it lifts
@@ -345,6 +566,17 @@ class Touch:
     commit: Callable | None = None   # what lifting the finger sends (a number, a target's Enter); dropped if the button goes away
     start_x: float = 0.0
     start_y: float = 0.0
+    choosing: bool = False  # a radial's finger may choose: it moved RADIAL_PX, or landed on a radial left open
+
+
+@dataclass
+class Pair:
+    """Two fingers on the trackpad in a profile with gestures (Game.gestures), and what they turned out to do."""
+    tids: tuple
+    spread: float           # the space between them when the second landed
+    center: tuple           # the point halfway between them then
+    mode: str = ""          # "" until decided, then "pinch" or "scroll" (left to the engine), and "done"
+    steps: int = 0          # zoom steps sent: in is positive
 
 
 @dataclass
@@ -392,9 +624,12 @@ class PadController:
         self.locked_mods: set = set()
         self.mouse = {BTN_LEFT: MouseButton(), BTN_RIGHT: MouseButton()}
         self.strip_rest = 0.0
+        self.pair: Pair | None = None
         self.last_touch: tuple | None = None    # (x, y, widget id) of the newest touch, for the settings view
-        # widget id -> "up", "down" or "cancel" while a finger swipes on a number, "confirm" on a target button
+        # widget id -> "up", "down" or "cancel" while a finger swipes on a number, "confirm" on a target button, and
+        # the slice under the finger, or None, for as long as a radial is open
         self.swipes: dict = {}
+        self.radial_opened = -10.0              # clock time the last radial began to bloom
         self.status_info: tuple | None = None   # (clock text, battery percent or None, charging) for the header
         # Burn-in protection, set by the app before each paint: how far everything is shifted, how bright it is,
         # and how visible the trackpad hints still are.
@@ -442,6 +677,15 @@ class PadController:
 
     def lit(self, widget: Widget) -> bool:
         return widget.id in self.pressed or self._clock() < self.flash_until.get(widget.id, 0.0)
+
+    def radial_growth(self) -> float:
+        """How far the open radial has bloomed: 0 when it opens, 1 after RADIAL_OPEN_S."""
+        return min(1.0, max(0.0, (self._clock() - self.radial_opened) / RADIAL_OPEN_S))
+
+    def blooming(self) -> bool:
+        """A radial is open and still blooming: the app repaints until it has."""
+        return self.radial_growth() < 1.0 and any(w.kind == "page" and w.data.radial and w.id in self.swipes
+                                                  for w in self.widgets)
 
     def glows(self, widget: Widget) -> bool:
         """True for the buttons an armed modifier will apply to: the click buttons."""
@@ -523,17 +767,21 @@ class PadController:
 
         return lambda: self._after_min(pressed_at, up)
 
-    def _tap(self, key: int, mods: tuple = ()) -> None:
+    def _tap(self, key: int, mods: tuple = (), then: Callable | None = None) -> None:
         """Send one keystroke whatever the finger does next: the modifiers, MOD_LEAD_S later the key for TAP_HOLD_S,
-        and the modifiers let go TAP_HOLD_S after that. The touch thread never waits for it."""
+        and the modifiers let go TAP_HOLD_S after that, and then then(). The touch thread never waits for it."""
         def mods_up() -> None:
             for code in reversed(mods):
                 self._release(code)
+            if then:
+                then()
 
         def key_up() -> None:
             self._release(key)
             if mods:
                 self._later(TAP_HOLD_S, mods_up)
+            elif then:
+                then()
 
         def key_down() -> None:
             self._press(key)
@@ -545,6 +793,64 @@ class PadController:
             self._later(MOD_LEAD_S, key_down)
         else:
             key_down()
+
+    def _type(self, text: str, then: Callable | None = None) -> None:
+        """Type text a key at a time (TYPE_HOLD_S, TYPE_GAP_S, TYPE_OPEN_S), and then then(). The touch thread never
+        waits for it."""
+        codes = [TYPED[ch] for ch in text]
+
+        def step(i: int) -> None:
+            if i == len(codes):
+                if then:
+                    then()
+                return
+
+            def up() -> None:
+                self._release(codes[i])
+                self._later(TYPE_OPEN_S if i == 0 else TYPE_GAP_S, lambda: step(i + 1))
+
+            self._press(codes[i])
+            self._later(TYPE_HOLD_S, up)
+
+        step(0)
+
+    def _radial_choice(self, widget: Widget, touch: Touch) -> str | None:
+        """The slice of widget's radial under touch, or None (see RADIAL_PX). A finger that landed outside a radial
+        that a tap left open chooses nothing either: it only closes it."""
+        if not touch.choosing:
+            return None
+        cx, cy = widget.center
+        if math.hypot(touch.start_x - cx, touch.start_y - cy) > radial_reach(cx, cy) + RADIAL_GROW:
+            return None
+        return radial_choice(cx, cy, touch.x, touch.y)
+
+    def _open_radial(self) -> Widget | None:
+        """A radial that a tap left open, with no finger on it: the next finger to land is its."""
+        return next((w for w in self.widgets if w.kind == "page" and w.data.radial and w.id in self.swipes
+                     and w.id not in self.pressed), None)
+
+    def _commit_radial(self, widget: Widget, touch: Touch, opening: bool) -> None:
+        """A radial's finger lifted: send the slice it chose and, for a chat radial (Slot.keyboard), show the keyboard
+        as it was last left (letters or symbols). Cancel, the middle or an empty slice send nothing and leave the page
+        as it is, but a tap on the button that opened the radial leaves it open."""
+        chosen = dict(widget.data.radial).get(self._radial_choice(widget, touch))
+        if chosen is None:
+            self.flash_until.pop(widget.id, None)  # nothing was sent: do not light it up
+            if opening and not touch.choosing:
+                self.swipes[widget.id] = None
+            return
+        # The keyboard comes up once the slice's keystroke is out: a key typed sooner would land among its letters,
+        # or with its Ctrl.
+        then = self._chat_keyboard if widget.data.keyboard else None
+        if chosen.text:
+            self._type(chosen.text, then)
+        else:
+            self._tap(*combo_for(chosen, self.bindings), then=then)
+
+    def _chat_keyboard(self) -> None:
+        if self.view == "pad":  # unless another finger has changed the view meanwhile
+            self._set_view("keyboard")
+            self.on_change()
 
     def _commit_target(self, widget: Widget, touch: Touch) -> None:
         """A target button's finger lifted, after its key let go: a swipe right confirms the target with Enter."""
@@ -584,6 +890,71 @@ class PadController:
             self.flash_until.pop(widget.id, None)  # nothing was sent: do not light it up
             return
         self._press_slot(widget.data, self.game.swipes[swipe][1] if swipe else ())()
+
+    # ------------------------------------------------------------------ two-finger gestures
+
+    def _pair_down(self) -> None:
+        """A finger landed on the trackpad: two of them start a gesture, and a third leaves an undecided one to the
+        engine and ends a pinch. The engine's own count is used: it forgets the fingers whose lift was lost."""
+        fingers = self.gesture.active_contacts
+        if self.pair is None and self.game.gestures and len(fingers) == 2 and all(t in self.touches for t in fingers):
+            (ax, ay), (bx, by) = ((self.touches[tid].x, self.touches[tid].y) for tid in fingers)
+            self.pair = Pair(tuple(fingers), math.hypot(bx - ax, by - ay), ((ax + bx) / 2, (ay + by) / 2))
+        elif self.pair and not self.pair.mode and len(fingers) > 2:
+            self.pair.mode = "scroll"
+        elif self.pair and self.pair.mode == "pinch":
+            # The engine forgot the pinch's fingers, so this one would point and click with the pinch's Ctrl held.
+            self.pair.mode = "done"
+            self._release(KEY_LEFTCTRL)
+
+    def _pair_move(self, tid: int) -> bool:
+        """A trackpad finger moved. Returns whether its gesture takes the move from the engine: until it is decided,
+        and after, unless it is a scroll. Once done, or once one finger has lifted, the other moves nothing."""
+        return self.pair is not None and tid in self.pair.tids and self.pair.mode != "scroll"
+
+    def frame_done(self) -> None:
+        """Every finger of a touch frame has been reported. The fingers of one frame arrive one at a time, so a
+        two-finger gesture is judged here: in the middle of a frame, two fingers sliding together look like a pinch."""
+        pair = self.pair
+        if pair is None or pair.mode in ("scroll", "done") or any(t not in self.touches for t in pair.tids):
+            return
+        (ax, ay), (bx, by) = ((self.touches[t].x, self.touches[t].y) for t in pair.tids)
+        spread = math.hypot(bx - ax, by - ay) - pair.spread
+        moved = math.hypot((ax + bx) / 2 - pair.center[0], (ay + by) / 2 - pair.center[1])
+        if not pair.mode:
+            if max(abs(spread), moved) < GESTURE_PX:
+                return
+            if abs(spread) <= moved:
+                pair.mode = "scroll"  # the engine catches up with the next move on the travel it was not given
+                return
+            pair.mode = "pinch"
+            self.gesture.reset_all()  # the engine forgets the two fingers: their lift must not click
+            self._press(KEY_LEFTCTRL)
+        # Ctrl and the wheel, which is how a browser receives a touchpad's pinch.
+        steps = int(spread / PINCH_PX_PER_STEP)
+        while pair.steps != steps:
+            step = 1 if steps > pair.steps else -1
+            pair.steps += step
+            self.bridge.emit_scroll(0, step * HI_RES_NOTCH)
+            self.haptic("tick")
+
+    def _pair_up(self) -> None:
+        """A trackpad finger lifted, or was let go of: its gesture ends once neither of its fingers is left."""
+        pair = self.pair
+        if pair is None:
+            return
+        if not pair.mode:
+            pair.mode = "scroll"  # lifted before it was decided: a two-finger tap, the engine's to click
+        elif pair.mode == "pinch":
+            pair.mode = "done"
+            self._release(KEY_LEFTCTRL)
+        if not any(t in self.touches for t in pair.tids):
+            self.pair = None
+
+    def _end_pair(self) -> None:
+        if self.pair and self.pair.mode == "pinch":
+            self._release(KEY_LEFTCTRL)
+        self.pair = None
 
     def unstick(self) -> None:
         """Make the game let go of Shift, Ctrl and Alt. A game can miss a key-up, for instance when Steam's overlay
@@ -653,6 +1024,7 @@ class PadController:
             touch.widget = None
         self.pressed.clear()
         self.swipes.clear()
+        self._end_pair()
         self.gesture.reset_all()
 
     def widget_at(self, x: float, y: float) -> Widget | None:
@@ -668,7 +1040,7 @@ class PadController:
 
     def touch_down(self, tid: int, x: float, y: float, ts: float) -> None:
         self._expired.discard(tid)
-        widget = self.widget_at(x, y)
+        widget = self._open_radial() or self.widget_at(x, y)
         self.last_touch = (x, y, widget.id if widget else "")
         touch = Touch(widget, ts, x, y, start_x=x, start_y=y)
         self.touches[tid] = touch
@@ -680,6 +1052,7 @@ class PadController:
         kind = widget.kind
         if kind == "surface":
             self.gesture.touch_down(tid, x, y, ts)
+            self._pair_down()
             return
         if kind in ("tab", "mode", "theme"):
             self.haptic("tick")
@@ -701,9 +1074,21 @@ class PadController:
                     if other is not touch and other.widget is widget:
                         self._end_touch(other_tid, inside=False)
                         self._expired.add(other_tid)
+                if touch.widget is None:  # ending it changed the view (a chat radial's keyboard): its button is gone
+                    self.on_change()
+                    return
             self.pressed.add(widget.id)
-            if kind == "page" and widget.data.tap:
+            if kind == "page" and widget.data.radial:
+                opening = widget.id not in self.swipes
+                touch.choosing = not opening
+                if opening:
+                    self.radial_opened = self._clock()
+                self.swipes[widget.id] = self._radial_choice(widget, touch)
+                touch.commit = lambda: self._commit_radial(widget, touch, opening)
+            elif kind == "page" and widget.data.tap:
                 self._tap(*combo_for(widget.data, self.bindings))
+            elif kind == "page" and widget.data.once:
+                self._press_slot(widget.data)()  # let go as soon as MIN_PRESS_S allows
             elif kind == "page":
                 touch.release = self._press_slot(widget.data)
                 if widget.data.confirm:
@@ -737,9 +1122,12 @@ class PadController:
         if touch.widget is None:
             return
         if touch.widget.kind == "surface":
-            self.gesture.touch_move(tid, x, y, ts)
-        elif touch.widget.kind == "number":
-            swipe = swipe_of(x - touch.start_x, y - touch.start_y)
+            if not self._pair_move(tid):
+                self.gesture.touch_move(tid, x, y, ts)
+        elif touch.widget.kind == "number" or (touch.widget.kind == "page" and touch.widget.data.confirm):
+            # A number's swipe adds a modifier or cancels it; a target's swipe right confirms it.
+            sx, sy = x - touch.start_x, y - touch.start_y
+            swipe = swipe_of(sx, sy) if touch.widget.kind == "number" else ("confirm" if confirms(sx, sy) else None)
             if swipe != self.swipes.get(touch.widget.id):
                 if swipe:
                     self.swipes[touch.widget.id] = swipe
@@ -747,13 +1135,11 @@ class PadController:
                     self.swipes.pop(touch.widget.id, None)
                 self.haptic("tick")
                 self.on_change()
-        elif touch.widget.kind == "page" and touch.widget.data.confirm:
-            confirm = confirms(x - touch.start_x, y - touch.start_y)
-            if confirm != (touch.widget.id in self.swipes):
-                if confirm:
-                    self.swipes[touch.widget.id] = "confirm"
-                else:
-                    self.swipes.pop(touch.widget.id, None)
+        elif touch.widget.kind == "page" and touch.widget.data.radial:
+            touch.choosing = touch.choosing or math.hypot(x - touch.start_x, y - touch.start_y) > RADIAL_PX
+            chosen = self._radial_choice(touch.widget, touch)
+            if chosen != self.swipes.get(touch.widget.id):
+                self.swipes[touch.widget.id] = chosen
                 self.haptic("tick")
                 self.on_change()
         elif touch.widget.kind == "strip":
@@ -775,6 +1161,7 @@ class PadController:
         widget = touch.widget
         if widget.kind == "surface":
             self.gesture.touch_up(tid, ts or touch.seen)
+            self._pair_up()
             return
         self.pressed.discard(widget.id)
         self.swipes.pop(widget.id, None)
@@ -801,6 +1188,8 @@ class PadController:
     def expire(self, now: float) -> None:
         """Drop contacts that have gone silent (a lost finger-lift). now is on the kernel's event clock."""
         self.gesture.expire_stale(now)
+        if self.pair and any(now - self.touches[t].seen > STALE_CONTACT_S for t in self.pair.tids if t in self.touches):
+            self._end_pair()  # a lost lift must not leave Ctrl held
         for tid, touch in list(self.touches.items()):
             if touch.widget is not None and touch.widget.kind != "surface" and now - touch.seen > BUTTON_STALE_S:
                 self._end_touch(tid, inside=False, ts=now)

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **A Desktop profile**, for the desktop, the web and anything else that is not a game. Pick **Desktop** under Game in Decky; it keeps its own remaps and profiles like the games do.
+  - Two pages across the whole width, with no number pad. **Edit**: Undo, Redo, Cut, Copy, Paste, Select all, Find and Save, and beside them Esc, Delete, Tab, Enter, Home, End, Page up and down. **Browser**: Back, Forward, Reload, Address bar, New, Close, Previous, Next and Reopen tab, Bookmark, Zoom out and in, and beside them Switch window, Close window, Full screen, Screenshot, Menu, and a **Media** radial with Play / pause, Previous, Next, Volume down and up, and Mute, drawn as icons.
+  - Paste, Save, Reload, New tab, Close tab, Reopen tab, Bookmark, Close window, Full screen and Screenshot send one keystroke per touch, so a resting thumb cannot close a row of tabs or paste over and over. The rest are held like the games' buttons, so Undo, Delete, Page down or Zoom in repeat while held.
+  - The keyboard has **F1 to F12** in two rows above it, and Super and the arrow keys, laid out as on a keyboard, beside them, in place of the small trackpad. The keys themselves are the same size as in the games.
+  - On the trackpad, **Back**, **Copy**, **Paste** and **Forward** replace Shift, Ctrl and Alt. **Pinch** to zoom (Ctrl and the wheel, as a browser takes a touchpad pinch). Two fingers still scroll every way, and a two-finger tap still right-clicks. The games' trackpads are unchanged.
+- **A Chat radial on the Utility page.** **Chat** is a big round button in the middle of the page's left half, and touching it opens a radial of channels out of its middle, like a flower. Slide onto one (it grows a little) and lift, or tap **Chat** and then tap a channel: the game's chat box opens on that channel while the pad switches to the keyboard, on the page you last left it. The red slice at the bottom cancels, and so does lifting in the middle, or tapping the middle or anywhere outside the radial.
+  - **WoW**: Guild, Party, Yell, Raid, Instance, Say and Whisper. WoW has no key per channel, so the pad types the channel's command (`/g ` and so on) into the chat box. It never presses Enter: nothing is said until you send it.
+  - **FFXI**: Linkshell, Party, Say and Reply, FFXI's own Ctrl shortcuts, one key each. Their remaps carry over.
+- **Shorter Utility pages, in rows.** WoW's loses Auto-run, Walk / run, Hide UI and both nameplate toggles; FFXI's loses Auto-run, Rest and Point of view, which the controller already covers, and its four chat buttons, now in the radial. The rest pair up: WoW's Sheathe weapons and Screenshot share a row and Sit / stand has its own, above Chat, and Chat page up and down share one under it; FFXI's Macro set up and down share a row above Chat.
+
 ## 0.8.0
 
 - **Final Fantasy XI.** Pick the game in Decky: the pad lays out FFXI's default keys on Menus, Target and Utility pages. Each game keeps its own remapped controls and profiles; switching sets one game's aside and brings the other's back.
