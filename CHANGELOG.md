@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - **A Desktop profile**, for the desktop, the web and anything else that is not a game. Pick **Desktop** under Game in Decky; it keeps its own remaps and profiles like the games do.
   - Two pages across the whole width, with no number pad. **Edit**: Undo, Redo, Cut, Copy, Paste, Select all, Find and Save, and beside them Esc, Delete, Tab, Enter, Home, End, Page up and down. **Browser**: Back, Forward, Reload, Address bar, New, Close, Previous, Next and Reopen tab, Bookmark, Zoom out and in, and beside them Switch window, Close window, Full screen, Screenshot, Menu, and a **Media** radial with Play / pause, Previous, Next, Volume down and up, and Mute, drawn as icons.
