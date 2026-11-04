@@ -735,6 +735,77 @@ def test_a_third_finger_on_the_trackpad_ends_a_pinch_so_it_clicks_without_ctrl()
     assert pad.pair is None
 
 
+def test_two_thumbs_that_swing_apart_as_they_scroll_still_scroll():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "mode:trackpad")
+    bridge.take()
+    two_fingers(pad, clock, (-40, -60, 40, -60), start_gap=500)  # 80 px further apart, 60 px up
+    events = bridge.take()
+    assert events and {e[0] for e in events} == {"scroll"} and all(dy > 0 for _, _, dy in events)  # up
+    two_fingers(pad, clock, (-30, 0, 30, 0), start_gap=500)  # but spreading apart in place still zooms
+    assert bridge.take()[0] == ("key", CTRL, True)
+    x, y = center(pad, "surface")  # and so does spreading with one finger kept still, for as long as it takes
+    pad.touch_down(941, x - 100, y, clock.now)
+    pad.touch_down(942, x + 100, y, clock.now)
+    for i in range(1, 41):
+        pad.touch_move(941, x - 100 - 4 * i, y, clock.now + 0.02 * i)
+        pad.frame_done()
+    events = bridge.take()
+    assert events[0] == ("key", CTRL, True) and events.count(("scroll", 0, pad_model.HI_RES_NOTCH)) == 2
+    assert pad.key_refs == {CTRL: 1}
+    pad.all_lifted(clock.now + 1)
+    assert not pad.key_refs
+
+
+def test_a_slow_pinch_with_one_finger_kept_still_zooms_rather_than_losing_the_still_finger():
+    pad, bridge, clock = make()
+    pad.apply_config({"game": "desktop"})
+    tap(pad, clock, "mode:trackpad")
+    bridge.take()
+    x, y = center(pad, "surface")
+    pad.touch_down(961, x - 100, y, clock.now)
+    pad.touch_down(962, x + 100, y, clock.now)
+    for i in range(1, 121):  # 60 px a second: well past LOST_LIFT_S before it spreads GESTURE_PX
+        pad.touch_move(961, x - 100 - i, y, clock.now + 0.016 * i)
+        pad.frame_done()
+    events = bridge.take()
+    assert 962 in pad.touches and pad.pair.mode == "pinch"
+    assert events[0] == ("key", CTRL, True) and "rel" not in {e[0] for e in events}
+    pad.all_lifted(clock.now + 3)
+    assert not pad.key_refs
+
+
+def test_a_lost_lift_ends_a_two_finger_scroll_once_the_other_finger_has_moved_on_its_own():
+    for game in ("wow", "desktop"):
+        pad, bridge, clock = make()
+        pad.apply_config({"game": game})
+        tap(pad, clock, "mode:trackpad")
+        x, y = center(pad, "surface")
+        pad.touch_down(951, x - 60, y, clock.now)
+        pad.touch_down(952, x + 60, y, clock.now)
+        clock.now += 0.5  # resting before they move is no lost lift
+        t = clock.now
+        for i in range(1, 31):  # both scroll down for 0.6 s
+            pad.touch_move(951, x - 60, y + 5 * i, t + 0.02 * i)
+            pad.touch_move(952, x + 60, y + 5 * i, t + 0.02 * i)
+            pad.frame_done()
+        events = bridge.take()
+        assert events and {e[0] for e in events} == {"scroll"}, game
+        t += 0.6  # 952 lifts, and the controller loses the lift: 951 alone goes on
+        for i in range(1, 31):
+            pad.touch_move(951, x - 60 + 5 * i, y + 150, t + 0.02 * i)
+            pad.frame_done()
+        events = bridge.take()
+        kinds = [e[0] for e in events]
+        scrolls = kinds.index("rel")  # the scrolling stops, and the pointer moves
+        assert set(kinds[:scrolls]) <= {"scroll"} and set(kinds[scrolls:]) == {"rel"}, game
+        assert scrolls * 0.02 <= pad_model.LOST_LIFT_S + 0.1, game
+        assert 952 not in pad.touches and not pad.key_refs, game
+        pad.touch_move(952, x + 200, y, t + 0.7)  # its id comes back with a new finger, which counts
+        assert 952 in pad.touches, game
+
+
 def test_changing_the_game_lets_go_and_keeps_the_page_when_it_can():
     pad, bridge, clock = make()
     tap(pad, clock, "tab:2")

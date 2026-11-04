@@ -94,7 +94,15 @@ THEME_IDS = tuple(theme for theme, _ in THEMES)
 # it is clear what they do: spreading apart or pinching together zooms, and anything else is the engine's own
 # two-finger scroll.
 GESTURE_PX = 24.0           # travel of the fingers, or change in the space between them, that decides
+# With both fingers moving, a pinch changes the space between them this many times more than it moves the point
+# halfway between them. Two thumbs scrolling swing apart as they go, by about twice as much. A pinch with one finger
+# kept still needs only the space to change more.
+PINCH_SPREAD = 3.0
 PINCH_PX_PER_STEP = 60.0    # change in the space between the fingers per zoom step
+# Two fingers on the trackpad move together. One that has said nothing while the other has kept moving for this long
+# lifted, and the controller lost the lift: the finger left behind would go on scrolling until STALE_CONTACT_S.
+LOST_LIFT_S = 0.3
+MOVING_GAP_S = 0.1          # a finger silent for longer than this has stopped moving
 THEME_Y, THEME_H = 590.0, 112.0  # the theme buttons on the settings view
 
 # Label heights in pixels.
@@ -567,6 +575,7 @@ class Touch:
     start_x: float = 0.0
     start_y: float = 0.0
     choosing: bool = False  # a radial's finger may choose: it moved RADIAL_PX, or landed on a radial left open
+    moving: float = 0.0     # kernel time it began to move this time, if it is moving (MOVING_GAP_S)
 
 
 @dataclass
@@ -574,7 +583,7 @@ class Pair:
     """Two fingers on the trackpad in a profile with gestures (Game.gestures), and what they turned out to do."""
     tids: tuple
     spread: float           # the space between them when the second landed
-    center: tuple           # the point halfway between them then
+    starts: tuple           # where each of them was then
     mode: str = ""          # "" until decided, then "pinch" or "scroll" (left to the engine), and "done"
     steps: int = 0          # zoom steps sent: in is positive
 
@@ -899,7 +908,7 @@ class PadController:
         fingers = self.gesture.active_contacts
         if self.pair is None and self.game.gestures and len(fingers) == 2 and all(t in self.touches for t in fingers):
             (ax, ay), (bx, by) = ((self.touches[tid].x, self.touches[tid].y) for tid in fingers)
-            self.pair = Pair(tuple(fingers), math.hypot(bx - ax, by - ay), ((ax + bx) / 2, (ay + by) / 2))
+            self.pair = Pair(tuple(fingers), math.hypot(bx - ax, by - ay), ((ax, ay), (bx, by)))
         elif self.pair and not self.pair.mode and len(fingers) > 2:
             self.pair.mode = "scroll"
         elif self.pair and self.pair.mode == "pinch":
@@ -919,12 +928,14 @@ class PadController:
         if pair is None or pair.mode in ("scroll", "done") or any(t not in self.touches for t in pair.tids):
             return
         (ax, ay), (bx, by) = ((self.touches[t].x, self.touches[t].y) for t in pair.tids)
+        (sax, say), (sbx, sby) = pair.starts
         spread = math.hypot(bx - ax, by - ay) - pair.spread
-        moved = math.hypot((ax + bx) / 2 - pair.center[0], (ay + by) / 2 - pair.center[1])
+        moved = math.hypot((ax + bx - sax - sbx) / 2, (ay + by - say - sby) / 2)
         if not pair.mode:
             if max(abs(spread), moved) < GESTURE_PX:
                 return
-            if abs(spread) <= moved:
+            still = min(math.hypot(ax - sax, ay - say), math.hypot(bx - sbx, by - sby)) < GESTURE_PX / 3
+            if abs(spread) <= moved * (1.0 if still else PINCH_SPREAD):
                 pair.mode = "scroll"  # the engine catches up with the next move on the travel it was not given
                 return
             pair.mode = "pinch"
@@ -1042,7 +1053,7 @@ class PadController:
         self._expired.discard(tid)
         widget = self._open_radial() or self.widget_at(x, y)
         self.last_touch = (x, y, widget.id if widget else "")
-        touch = Touch(widget, ts, x, y, start_x=x, start_y=y)
+        touch = Touch(widget, ts, x, y, start_x=x, start_y=y, moving=ts)
         self.touches[tid] = touch
         if widget is None or widget.kind == "status":
             touch.widget = None
@@ -1118,10 +1129,13 @@ class PadController:
                 self.touch_down(tid, x, y, ts)
             return
         dy = y - touch.y
+        if ts - touch.seen > MOVING_GAP_S:
+            touch.moving = ts
         touch.seen, touch.x, touch.y = ts, x, y
         if touch.widget is None:
             return
         if touch.widget.kind == "surface":
+            self._lift_lost_fingers(touch, ts)
             if not self._pair_move(tid):
                 self.gesture.touch_move(tid, x, y, ts)
         elif touch.widget.kind == "number" or (touch.widget.kind == "page" and touch.widget.data.confirm):
@@ -1149,6 +1163,18 @@ class PadController:
             if step:
                 self.strip_rest -= step
                 self.bridge.emit_scroll(0, step)
+
+    def _lift_lost_fingers(self, touch: Touch, ts: float) -> None:
+        """touch moved on the trackpad: the other fingers there that have said nothing for as long as it has been
+        moving, LOST_LIFT_S at least, lifted (LOST_LIFT_S). Not in a pinch, nor in a pair that may yet turn out to be
+        one: one of its fingers may be kept still, and a slow pinch takes a while to spread GESTURE_PX."""
+        if self.pair and self.pair.mode in ("", "pinch"):
+            return
+        for tid, other in list(self.touches.items()):
+            if (other is not touch and other.widget is not None and other.widget.kind == "surface"
+                    and ts - max(other.seen, touch.moving) > LOST_LIFT_S):
+                self._end_touch(tid, inside=False, ts=ts)
+                self._expired.add(tid)  # the kernel may reuse its id for a new finger
 
     def touch_up(self, tid: int, ts: float) -> None:
         self._expired.discard(tid)

@@ -24,10 +24,10 @@
 - **Shortcut**: **Home + Start** opens or closes the pad from anywhere in Game Mode, mid-game included, without opening Decky. A toast says which. **Change shortcut** records the next button or buttons you press instead, such as the AYN button below the screen; **Back to Home + Start** undoes it. Turn the shortcut off here if a game needs that combination.
 - **AYN button**: the button below the screen opens or closes the pad too. Steam still takes a screenshot each time unless you also turn on **Stop the screenshot**. Until then, **Home + R1** opens and closes the pad as well, because that is what the AYN button sends when InputPlumber emulates a Steam Deck controller.
 - **Stop the screenshot**: the AYN button sends F24, a key nothing uses, instead of the screenshot. JarnGrip does this by loading InputPlumber's profile again with that one button changed; no file changes. It stays until you turn it off or uninstall JarnGrip: InputPlumber forgets it when it restarts, and JarnGrip applies it again each time it starts.
-- **Theme**, **haptics** strength, **burn-in protection**, a **24-hour clock**, and **Start with Desktop Mode**.
+- **Theme**, **haptics** strength, **trackpad sensitivity** (how far the pointer moves for a finger's travel, 0.2× to 3×; 1× by default), **burn-in protection**, a **24-hour clock**, and **Start with Desktop Mode**.
 - **Remap a control**: pick a control, a key and any of **With Ctrl / Shift / Alt**, then save. **Reset to default** puts it back.
 - **Profiles**: saved sets of remaps for the current game. Load one, save to it, save as a new profile, or delete one.
-- **Trackpad sensitivity**, **Stop and restore screen services**, and **Uninstall JarnGrip**, which uses Decky's own uninstall: it stops the pad, gives the bottom screen and the AYN button back, and removes JarnGrip, keeping your settings and profiles.
+- **Stop and restore screen services**, and **Uninstall JarnGrip**, which uses Decky's own uninstall: it stops the pad, gives the bottom screen and the AYN button back, and removes JarnGrip, keeping your settings and profiles.
 
 While the pad runs, it stops Ratatoskr or Armada's own bottom-screen service, and starts it again when you stop the pad. Don't run two bottom-screen drivers at once.
 
