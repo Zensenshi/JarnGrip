@@ -11,7 +11,7 @@ JarnGrip is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) 
 - **Number pad icons**: put your own pictures on the numbers and their swipes, like a Stream Deck, or let the JarnGrip WoW addon show your action bars' icons and spell names on them.
 - **Trackpad** and **keyboard**, one tap away.
 - **Four themes**: Classic, Charcoal, Dark, and Game Glass over a picture of your choice.
-- **Haptics**, a **clock and battery**, and **burn-in protection** for the OLED screen.
+- **Haptics**, a **clock and battery** that open a **status card** (network, battery and temperatures) with a tap, and **burn-in protection** for the OLED screen.
 - **Remap any button** from Decky, and keep sets of remaps as profiles.
 - **One press** to open or close it in a game: Home + Start, or the AYN button below the screen.
 - Runs in **Game Mode** and, optionally, **Desktop Mode**.
@@ -44,7 +44,7 @@ Two tips:
 - **Previous enemy opens the Steam menu?** WoW's default for it, Shift+Tab, is also Steam's overlay shortcut. Bind it to Ctrl+Tab in WoW and remap it in Decky.
 - **Keys act as if Shift is held?** Tap **Unstick keys** in the settings.
 
-**Number pad icons** turn the numbers into square keys with your own pictures: one for the tap, and one for each swipe, shown in a square that opens beside the key the way you swipe, and fades after you lift. Copy PNG, JPEG or WebP files into `~/Pictures/JarnGrip/Icons/wow` (or `ffxi`), turn on **Show icons** under **Number pad icons** in Decky, and pick a picture for each key on the full-screen page **Edit icons…** opens. Each profile keeps its own icons. JarnGrip ships no pictures for the numbers: the games' own artwork belongs to their publishers (the guide lists where to find some). In WoW, the small JarnGrip addon (in `wow-addon/`) saves what your action bar keys hold, and keys without a picture of their own show its icon, or the spell's name: see [the guide](docs/guide.md#your-wow-action-bars-on-the-keys).
+**Number pad icons** turn the numbers into square keys with your own pictures: one for the tap, and one for each swipe, shown in a square that opens beside the key the way you swipe, and fades after you lift. Copy PNG, JPEG or WebP files into `~/Pictures/JarnGrip/Icons/wow` (or `ffxi`), pick **Icons** under **Number keys show** in Decky, and pick a picture for each key on the full-screen page **Edit icons…** opens. Each profile keeps its own icons. JarnGrip ships no pictures for the numbers: the games' own artwork belongs to their publishers (the guide lists where to find some). In WoW, the small JarnGrip addon (in `wow-addon/`) saves what your action bar keys hold, and the keys show each spell's name, even without icons (the default), or in icon mode its icon where it has no picture of its own: see [the guide](docs/guide.md#your-wow-action-bars-on-the-keys).
 
 In FFXI, swipe a party target (Self, Party 1 to 5) **right** to press Enter after it, which casts a `<stpt>` spell on that member.
 

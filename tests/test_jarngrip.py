@@ -1155,9 +1155,10 @@ def test_a_buzz_for_every_button_but_not_for_the_trackpad():
     pad, bridge, clock = make(haptic=buzzes.append)
     tap(pad, clock, "number:slot_1")
     tap(pad, clock, "page:character")
-    tap(pad, clock, "status")  # the clock and battery are not a button
+    tap(pad, clock, "status")  # the clock and battery open the status card, like a tab
+    tap(pad, clock, "status")  # and a touch closes it
     tap(pad, clock, "mode:trackpad")
-    assert buzzes == ["press", "press", "tick"]
+    assert buzzes == ["press", "press", "tick", "tick", "tick"]
     for target in ("surface", "strip"):
         pad.touch_down(50, *center(pad, target), clock.now)
         pad.touch_up(50, clock.now + 0.05)
@@ -1165,7 +1166,7 @@ def test_a_buzz_for_every_button_but_not_for_the_trackpad():
     tap(pad, clock, "mouse:left", held=0.05)
     clock.now -= 0.4
     tap(pad, clock, "mouse:left", held=0.05)  # a double tap locks it: two buzzes
-    assert buzzes == ["press", "press", "tick", "press", "press", "lock"]
+    assert buzzes == ["press", "press", "tick", "tick", "tick", "press", "press", "lock"]
 
 
 def test_locking_a_modifier_buzzes_twice():
@@ -1480,6 +1481,152 @@ def test_the_battery_is_read_from_sysfs():
     assert system_status.clock_text(True, 0).count(":") == 1
     assert not system_status.clock_text(False, 0).startswith("0")
 
+
+
+def fake_nmcli(outputs):
+    """A stand-in subprocess.run for nmcli: outputs maps its arguments after -t, joined by spaces, to what it prints."""
+    asked = []
+
+    def run(args, **kwargs):
+        assert args[:2] == ["nmcli", "-t"] and kwargs.get("timeout")
+        key = " ".join(args[2:])
+        asked.append(key)
+        if key not in outputs:
+            return types.SimpleNamespace(returncode=10, stdout="")
+        return types.SimpleNamespace(returncode=0, stdout=outputs[key])
+
+    run.asked = asked
+    return run
+
+
+def test_the_status_card_reads_the_network_from_networkmanager():
+    devices = "-f DEVICE,TYPE,STATE device"
+    wifi = "-f ACTIVE,SSID,SIGNAL,FREQ,RATE device wifi list --rescan no"
+    run = fake_nmcli({
+        devices: "lo:loopback:connected (externally)\np2p-dev-wlp1s0:wifi-p2p:disconnected\nwlp1s0:wifi:connected\n",
+        wifi: "no:Neighbours:40:5180 MHz:540 Mbit/s\nyes:Home\\:Net:78:2412 MHz:130 Mbit/s\n",
+        "-f IP4.ADDRESS device show wlp1s0": "IP4.ADDRESS[1]:172.20.10.3/28\n",
+        "networking connectivity": "full\n",
+    })
+    network = system_status.read_network(run, local_ip=lambda: "unused")
+    assert network == {"kind": "wifi", "device": "wlp1s0", "name": "Home:Net", "signal": 78, "mhz": 2412,
+                       "rate": "130 Mbit/s", "ip": "172.20.10.3", "internet": "full"}
+    assert "rescan yes" not in " ".join(run.asked)  # never a scan: it stalls the Wi-Fi for seconds
+
+    wired = system_status.read_network(fake_nmcli({devices: "eth0:ethernet:connected\n",
+                                                   "networking connectivity": "portal\n"}), local_ip=lambda: "10.0.0.5")
+    assert (wired["kind"], wired["ip"], wired["internet"]) == ("ethernet", "10.0.0.5", "portal")
+    offline = system_status.read_network(fake_nmcli({devices: "wlp1s0:wifi:disconnected\n"}))
+    assert offline["kind"] == ""
+
+    def missing(args, **kwargs):
+        raise FileNotFoundError(args[0])
+
+    assert system_status.read_network(missing, local_ip=lambda: "192.168.1.28")["ip"] == "192.168.1.28"
+    assert system_status.read_network(missing, local_ip=lambda: "")["kind"] == ""
+
+
+def thor_sysfs(tmp, status="Discharging", current="900000"):
+    """The Thor's battery, a few of its thermal zones and its fan, as seen on one (2026-11-12)."""
+    def write(path, **files):
+        os.makedirs(os.path.join(tmp, path), exist_ok=True)
+        for key, value in files.items():
+            with open(os.path.join(tmp, path, key), "w") as f:
+                f.write(value + "\n")
+
+    write("power/battery", type="Battery", status=status, capacity="54", charge_now="3206500",
+          charge_full="6413000", charge_full_design="5938000", current_now=current, voltage_now="4000000",
+          power_now="40428492", temp="300", cycle_count="5", health="Good")
+    write("power/qcom-battmgr-usb", type="USB", current_now="937000", voltage_now="4859000")
+    for i, (kind, temp) in enumerate([("cpu7-top-thermal", "44200"), ("cpuss0-thermal", "43800"),
+                                      ("gpuss-1-thermal", "41400"), ("gpuss-0-thermal", "40200"),
+                                      ("battery", "30000"), ("modem0-thermal", "90000")]):
+        write(f"thermal/thermal_zone{i}", type=kind, temp=temp)
+    write("hwmon/hwmon1", name="cpuss0_thermal")
+    write("hwmon/hwmon40", name="pwmfan", fan1_input="2067")
+    return {name: os.path.join(tmp, name) for name in ("power", "thermal", "hwmon")}
+
+
+def test_the_status_card_reads_the_battery_temperatures_and_fan():
+    with tempfile.TemporaryDirectory() as tmp:
+        roots = thor_sysfs(tmp)
+        battery = system_status.read_battery_details(roots["power"])
+        assert battery["status"] == "Discharging" and battery["percent"] == 54
+        assert abs(battery["watts"] - 3.6) < 1e-9  # volts times amps: the driver's power_now says 40 W
+        assert (battery["temp"], battery["cycles"], battery["health"]) == (30.0, 5, "Good")
+        assert system_status.read_temperatures(roots["thermal"]) == {"CPU": 44.2, "GPU": 41.4, "Battery": 30.0}
+        assert system_status.read_fan(roots["hwmon"]) == 2067
+        assert system_status.read_battery_details(os.path.join(tmp, "nothing")) is None
+
+    rate = system_status.BatteryRate()
+    for second in range(2):
+        rate.add(battery, 100.0 + second)
+    assert rate.hours(battery) is None  # too soon to tell
+    rate.add(battery, 102.0)
+    assert abs(rate.hours(battery) - 3206500 / 900000) < 1e-9
+    charging = dict(battery, status="Charging")
+    rate.add(charging, 103.0)  # plugged in: the drain says nothing about the charge
+    assert rate.hours(charging) is None
+    for second in range(4, 7):
+        rate.add(charging, 100.0 + second)
+    assert abs(rate.hours(charging) - (6413000 - 3206500) / 900000) < 1e-9
+
+    sections = dict(system_status.card_sections(
+        {"kind": "wifi", "device": "wlp1s0", "name": "Home", "signal": 78, "mhz": 2412, "rate": "130 Mbit/s",
+         "ip": "172.20.10.3", "internet": "full"}, battery, 3.55, {"CPU": 44.2, "GPU": 41.4}, 2067))
+    assert sections["Network"] == [("Wi-Fi", "Home"), ("Signal", "78% · Strong"), ("Band", "2.4 GHz · 130 Mbit/s"),
+                                   ("IP address", "172.20.10.3"), ("Internet", "Connected")]
+    assert sections["Battery"] == [("Charge", "54% · on battery"), ("Time left", "3 h 33 min"),
+                                   ("Power", "Using 3.6 W"), ("Health", "Good · 5 cycles")]
+    assert sections["Temperatures"] == [("CPU", "44 °C"), ("GPU", "41 °C"), ("Battery", "30 °C"),
+                                        ("Fan", "2067 rpm")]
+    full = dict(system_status.card_sections(None, dict(battery, status="Charging", percent=100), 0.0, {}, None))
+    assert full["Network"] == [("Status", "Looking…")]
+    assert ("Until full", "Full") in full["Battery"]
+    assert dict(system_status.card_sections({"kind": ""}, None, None, {}, None)) == {"Network": [("Status", "Offline")]}
+
+
+def test_tapping_the_clock_opens_the_status_card_and_any_touch_closes_it():
+    opened = []
+    pad, bridge, clock = make(on_card=opened.append)
+    tap(pad, clock, "status")
+    assert pad.card_open and opened == [True]
+    tap(pad, clock, "number:slot_5")  # closes the card, and presses nothing under it
+    assert not pad.card_open and opened == [True, False]
+    assert bridge.take() == []
+    tap(pad, clock, "number:slot_5")  # with the card closed, the key works again
+    assert ("key", 6, True) in bridge.take()
+
+    tap(pad, clock, "status")
+    tap(pad, clock, "status")  # the clock closes it too
+    assert not pad.card_open
+    tap(pad, clock, "status")
+    clock.now += pad_model.CARD_S - 1
+    pad.expire_card()
+    assert pad.card_open
+    clock.now += 1
+    pad.expire_card()  # it never stays on the OLED
+    assert not pad.card_open and opened[-1] is False
+
+
+def test_the_status_card_paints_in_every_theme_and_fits_the_screen():
+    pad_draw = painter()
+    with tempfile.TemporaryDirectory() as tmp:
+        roots = thor_sysfs(tmp)
+        battery = system_status.read_battery_details(roots["power"])
+        sections = system_status.card_sections(
+            {"kind": "wifi", "name": "A network with a very long name indeed", "signal": 20, "mhz": 5180,
+             "rate": "866 Mbit/s", "ip": "192.168.100.200", "internet": "limited"}, battery, None,
+            system_status.read_temperatures(roots["thermal"]), system_status.read_fan(roots["hwmon"]))
+    for theme in pad_model.THEME_IDS:
+        pad, bridge, clock = make()
+        pad.apply_config({"theme": theme})
+        tap(pad, clock, "status")
+        pad_draw.paint(Context(), pad)  # before the facts arrive
+        pad.card_sections = sections
+        pad_draw.paint(Context(), pad)
+        x, y, w, h = pad_draw.card_box(pad)
+        assert x >= 0 and x + w <= pad_model.W and y >= pad_model.BODY_Y and y + h <= pad_model.H
 
 def test_burn_in_dims_an_untouched_pad_and_a_touch_wakes_it():
     burn = BurnInProtector(idle_timeout=60.0, idle_floor=0.4)
@@ -2112,6 +2259,68 @@ def test_number_pad_icons_are_kept_per_game_and_with_each_profile():
         assert (cfg["icons"]["slot_1"], cfg["number_icons"], cfg["active_profile"]) == ("fireball.png", True, "Mage")
 
 
+def test_the_number_keys_show_their_spell_names_on_the_tall_keys_and_in_the_fans():
+    pad_draw = painter()
+    pad, bridge, clock = make()
+    pad.wow_bars = {"slot_5": {"name": "Frostbolt", "picture": "frost.png"},
+                    "slot_5:up": {"name": "Shadow Word: Pain", "picture": ""}}
+    pad.icon_surfaces = {"frost.png": Anything()}
+    key = next(w for w in pad.widgets if w.id == "number:slot_5")
+    assert pad.number_pad == "names" and not pad.number_icons and key.w != key.h  # the tall keys, not squares
+    named, fans = [], []
+    real_named, real_fan = pad_draw._named_key, pad_draw._swipe_fan
+    pad_draw._named_key = lambda cr, t, w, name, lit, label: named.append((w.id, name, label))
+    pad_draw._swipe_fan = lambda cr, t, w, swipe, label, name=False: fans.append((swipe, label, name))
+    try:
+        pad_draw.paint(Context(), pad)
+        assert ("number:slot_5", "Frostbolt", "5") in named  # its name, never its picture: that is icon mode
+        x, y = center(pad, "number:slot_5")
+        for dx, dy in ((0, -90), (-90, 0), (0, 90)):
+            tid = down(pad, clock, "number:slot_5")
+            pad.touch_move(tid, x + dx, y + dy, clock.now)
+            pad_draw.paint(Context(), pad)
+            pad.touch_up(tid, clock.now)
+            clock.now += 0.5
+        # What the swipe casts, else its modifier; a cancel stays a cancel.
+        assert fans == [("up", "Shadow Word: Pain", True), ("down", "Ctrl", False), ("cancel", "Cancel", False)]
+    finally:
+        pad_draw._named_key, pad_draw._swipe_fan = real_named, real_fan
+    pad_draw.paint(Context(), pad)  # the real fan, its name on two lines
+    assert pad_model.number_pad_mode({}) == "names"
+    assert pad_model.number_pad_mode({"number_icons": True}) == "icons"  # a config from before the names
+    assert pad_model.number_pad_mode({"number_pad": "numbers", "number_icons": True}) == "numbers"
+
+
+def test_the_number_pad_mode_is_kept_per_game_and_old_configs_carry_over():
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        import main
+
+        assert main.NUMBER_PAD_MODES == pad_model.NUMBER_PAD_MODES
+        cfg = call("get_config")
+        assert (cfg["number_pad"], cfg["number_icons"]) == ("names", False)
+        cfg = call("save_config", {"number_pad": "icons"})["config"]
+        assert (cfg["number_pad"], cfg["number_icons"]) == ("icons", True)  # kept for a pad from before the names
+        assert call("save_config", {"number_pad": "pictures"})["config"]["number_pad"] == "icons"
+        # A panel from before the names: icons off leaves the names, and never turns numbers into names.
+        assert call("save_config", {"number_icons": False})["config"]["number_pad"] == "names"
+        call("save_config", {"number_pad": "numbers"})
+        assert call("save_config", {"number_icons": False})["config"]["number_pad"] == "numbers"
+        assert call("select_game", "ffxi")["config"]["number_pad"] == "names"
+        assert call("select_game", "wow")["config"]["number_pad"] == "numbers"
+
+        # A config saved before there was a number_pad, with a game set aside in it.
+        Path(tmp, "config.json").write_text(json.dumps({"game": "wow", "number_icons": False,
+                                                        "games": {"ffxi": {"number_icons": True}}}))
+        assert call("get_config")["number_pad"] == "names"
+        cfg = call("select_game", "ffxi")["config"]
+        assert (cfg["number_pad"], cfg["number_icons"]) == ("icons", True)
+        Path(tmp, "config.json").write_text(json.dumps({"number_icons": True}))
+        assert call("get_config")["number_pad"] == "icons"
+
+
 def test_the_icon_page_gets_small_pictures_themselves_and_big_ones_by_name():
     import base64
 
@@ -2540,7 +2749,10 @@ def test_a_key_without_a_picture_of_its_own_shows_its_wow_icon_or_name():
     slot1, slot2 = pad_model.NUMBER_SLOTS[:2]
     pad.wow_bars = {"slot_1": {"name": "Lightning Bolt", "picture": "bolt.png"},
                     "slot_1:up": {"name": "Earth Shock", "picture": ""}, "slot_2": {"name": "Hex", "picture": ""}}
-    assert pad.icon_of(slot1) == "" and pad.name_of(slot1) == "" and pad.picture_names() == set()  # icons off
+    # By default the keys show names, and no pictures; with numbers, neither.
+    assert pad.icon_of(slot1) == "" and pad.name_of(slot1) == "Lightning Bolt" and pad.picture_names() == set()
+    pad.apply_config({"number_pad": "numbers"})
+    assert pad.name_of(slot1) == "" and pad.name_of(slot1, "up") == ""
     pad.apply_config({"number_icons": True, "icons": {"slot_2": "mine.png"}})
     assert (pad.icon_of(slot1), pad.name_of(slot1)) == ("bolt.png", "Lightning Bolt")
     assert (pad.icon_of(slot1, "up"), pad.name_of(slot1, "up")) == ("", "Earth Shock")
@@ -2550,8 +2762,8 @@ def test_a_key_without_a_picture_of_its_own_shows_its_wow_icon_or_name():
     pad_draw = painter()
     pad.wow_bars["slot_3:down"] = {"name": "Summon Elemental Lord of the Very Long Spell Names", "picture": ""}
     pad.icon_surfaces = {"bolt.png": Anything()}
-    for theme in pad_model.THEME_IDS:
-        pad.apply_config({"theme": theme, "number_icons": True})
+    for theme, mode in ((theme, mode) for theme in pad_model.THEME_IDS for mode in ("icons", "names")):
+        pad.apply_config({"theme": theme, "number_pad": mode})
         pad_draw.paint(Context(), pad)
         for widget_id, dy in (("number:slot_1", -90), ("number:slot_1", 90), ("number:slot_3", 90)):
             tid = down(pad, clock, widget_id)
@@ -2727,6 +2939,10 @@ def test_the_pad_looks_up_the_wow_bars_on_their_own_thread():
         assert fn(*args) is False  # handed to the GTK thread, once
         assert app.pad.wow_bars["slot_1:up"] == {"name": "Earth Shock", "picture": "earth shock.png"}
         assert "earth shock.png" in app.pad.icon_surfaces and app.area.draws == 1
+        app.pad.apply_config({"number_pad": "numbers"})
+        app._ask_wow_bars()  # numbers only: still read, for the = key's ^ (wow_jis), but the names are not shown
+        assert app._wow_inputs[0] is True and app.pad.wow_bars
+        assert app.pad.name_of(pad_model.NUMBER_SLOTS[0], "up") == ""
         app._config = {"wow_bars": False}
         app._ask_wow_bars()  # turned off: forgotten at once, and redrawn
         assert app.pad.wow_bars == {} and app.area.draws == 2

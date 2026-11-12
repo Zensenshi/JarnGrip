@@ -54,7 +54,10 @@ THEMES = ("classic", "charcoal", "dark", "glass")
 # The games the pad has a layout for (pad_model.GAMES). Each keeps its own remapped controls, number pad icons and
 # profiles: the current game's are at the top of the config, the others' set aside under "games".
 GAMES = ("wow", "ffxi", "desktop")
-PER_GAME = ("bindings", "icons", "number_icons", "profiles", "active_profile")
+PER_GAME = ("bindings", "icons", "number_pad", "number_icons", "profiles", "active_profile")
+# What the number keys show (pad_model.NUMBER_PAD_MODES). number_icons is kept as well, true in icon mode only, for the
+# pad and panel of a version from before the names mode, and is how a config from then says which mode it had.
+NUMBER_PAD_MODES = ("numbers", "names", "icons")
 BACKGROUNDS = HOME / "Pictures/JarnGrip"
 PICTURE_TYPES = wow_bars.PICTURE_TYPES  # what the pad can show
 # The number pad's icons, a folder per game (Icons/wow, Icons/ffxi). An icon is saved under its number's id, and its
@@ -96,7 +99,8 @@ DEFAULT = {
     "haptics_strength": 1.0, "burn_in": True, "clock_24h": False, "background_image": "", "glass_blur": 3, "desktop_mode": False,
     "shortcut": True, "shortcut_buttons": [1 << 13 | 1 << 14, 0], "ayn_button": False,
     "ayn_no_screenshot": False,
-    "bindings": {}, "icons": {}, "number_icons": False, "profiles": {"Default": {"bindings": {}, "icons": {}}},
+    "bindings": {}, "icons": {}, "number_pad": "names", "number_icons": False,
+    "profiles": {"Default": {"bindings": {}, "icons": {}}},
     "active_profile": "Default",
     "game": "wow", "games": {},
     "wow_bars": True,  # in WoW, keys without a picture of their own show what the action bars hold (wow_bars.py)
@@ -154,14 +158,29 @@ def _mkdir(path: Path) -> None:
             pass
 
 
+def _number_pad(block: dict) -> str:
+    """The number pad mode a config, or a game set aside in one, has: number_pad, or, before there was one, icons if
+    number_icons was on and names (the number, where WoW's bars say nothing) if not."""
+    mode = block.get("number_pad")
+    return mode if mode in NUMBER_PAD_MODES else "icons" if block.get("number_icons") else "names"
+
+
+def _set_number_pad(cfg: dict, mode: str) -> None:
+    cfg["number_pad"], cfg["number_icons"] = mode, mode == "icons"
+
+
 def _read() -> dict:
     cfg = json.loads(json.dumps(DEFAULT))
+    saved: dict = {}
     try:
         saved = json.loads(CFG.read_text())
         if isinstance(saved, dict):
             cfg.update(saved)
+        else:
+            saved = {}
     except (OSError, ValueError):
         pass
+    _set_number_pad(cfg, _number_pad(saved))
     if not isinstance(cfg.get("bindings"), dict):
         cfg["bindings"] = {}
     if not isinstance(cfg.get("icons"), dict):
@@ -583,9 +602,14 @@ class Plugin:
         current["haptics_strength"] = _number(cfg.get("haptics_strength"), 0.05, 1.0, current["haptics_strength"])
         current["glass_blur"] = int(_number(cfg.get("glass_blur"), 1, 5, current["glass_blur"]))
         for key in ("haptics", "burn_in", "clock_24h", "desktop_mode", "shortcut", "ayn_button", "ayn_no_screenshot",
-                    "number_icons", "wow_bars"):
+                    "wow_bars"):
             if key in cfg:
                 current[key] = bool(cfg[key])
+        if cfg.get("number_pad") in NUMBER_PAD_MODES:
+            _set_number_pad(current, cfg["number_pad"])
+        elif "number_icons" in cfg:  # a panel from before the names mode: off leaves the names
+            _set_number_pad(current, "icons" if cfg["number_icons"] else
+                            "names" if current["number_pad"] == "icons" else current["number_pad"])
         if "desktop_mode" in cfg:
             _install_desktop_entries(current["desktop_mode"])
         buttons = cfg.get("shortcut_buttons")  # [ulButtons, ulUpperButtons] masks from Steam, as the panel records them
@@ -651,6 +675,7 @@ class Plugin:
             saved = cfg["games"].pop(game, None)
             saved = saved if isinstance(saved, dict) else {}
             cfg.update({key: json.loads(json.dumps(saved.get(key, DEFAULT[key]))) for key in PER_GAME})
+            _set_number_pad(cfg, _number_pad(saved))  # a game set aside before there was a number_pad
             cfg["game"] = game
             _write(cfg)
         return {"ok": True, "config": _read()}

@@ -78,9 +78,15 @@ RADIAL_BUTTON_R = 150.0     # the round button that opens a radial
 # Which way each swipe on a number goes, and where its fan or square opens: "up" and "down" name the game's first and
 # second modifiers (as icons are saved: "slot_5:up"), reached by swiping up and left; swiping down cancels.
 SWIPE_SIDES = {"up": "up", "down": "left", "cancel": "down"}
+# What the number keys show (the config's number_pad): their number; the name of what they hold on the WoW action bars,
+# where the JarnGrip addon says, else their number; or square keys with pictures, else that name, else the number.
+NUMBER_PAD_MODES = ("numbers", "names", "icons")
 SWIPE_FADE_S = 2.0  # in icon mode, a modifier's square fades for this long after its key is sent
 SWIPE_GROW = 1.35   # in icon mode, how much bigger than the key a modifier's square is (cancel's is the key's size)
 RADIAL_OPEN_S = 0.28        # how long a radial takes to bloom
+# A tap on the clock and battery opens the status card (network, battery, temperatures) over the pad; any touch closes
+# it, and it closes by itself after this long, so that it never sits on the OLED.
+CARD_S = 20.0
 
 # Layout, in bottom-screen pixels.
 MARGIN = 16.0
@@ -658,19 +664,28 @@ class MouseButton:
     last_down: float = -10.0
 
 
+def number_pad_mode(cfg: dict) -> str:
+    """What a config's number keys show (NUMBER_PAD_MODES). Before number_pad, a config said only whether icons were
+    on: on is icons, and off is names, which is the number wherever WoW's bars say nothing."""
+    mode = cfg.get("number_pad")
+    return mode if mode in NUMBER_PAD_MODES else "icons" if cfg.get("number_icons") else "names"
+
+
 class PadController:
     """Pad state and touch handling. The bridge is engine.UInputBridge (or anything with key, mouse_button and
     emit_scroll); the gesture engine drives the pointer for touches on the trackpad surface."""
 
     def __init__(self, bridge, gesture, on_change: Callable = lambda widget=None: None, on_close: Callable = lambda: None,
                  haptic: Callable = lambda pattern: None, on_theme: Callable = lambda theme: None,
-                 clock: Callable = time.monotonic, sleep: Callable = time.sleep, later: Callable | None = None) -> None:
+                 on_card: Callable = lambda opened: None, clock: Callable = time.monotonic,
+                 sleep: Callable = time.sleep, later: Callable | None = None) -> None:
         self.bridge = bridge
         self.gesture = gesture
         self.on_change = on_change  # something visible changed: redraw; on_change(widget) when only its swipe did
         self.on_close = on_close    # "Close pad" was tapped
         self.haptic = haptic        # haptic(pattern): "press", "tick" or "lock" (see haptics.PATTERNS)
         self.on_theme = on_theme    # a theme was picked on the settings view: keep it
+        self.on_card = on_card      # on_card(opened): the status card opened or closed, so the app reads its facts
         self._clock = clock
         self._sleep = sleep
         # later(delay, job) runs job after delay seconds without holding up the touch thread meanwhile; the app runs
@@ -683,6 +698,7 @@ class PadController:
         self.kb_symbols = False
         self.kb_shift = "off"   # off, on (next key only), caps
         self.bindings: dict = {}
+        self.number_pad = "names"   # NUMBER_PAD_MODES: what the number keys show
         self.number_icons = False   # the number keys show icons (only in a game with a number block)
         self.icons: dict = {}       # icon_id -> a picture's file name, in the game's icon folder
         self.icon_surfaces: dict = {}  # file name -> its picture, square (pad_draw.make_icon); set by the app
@@ -715,6 +731,10 @@ class PadController:
         self.swipes: dict = {}
         self.radial_opened = -10.0              # clock time the last radial began to bloom
         self.status_info: tuple | None = None   # (clock text, battery percent or None, charging) for the header
+        self.card_open = False
+        self.card_opened = -CARD_S              # clock time the status card last opened
+        # What the status card shows, set by the app (system_status.card_sections): [(heading, [(label, value)]), ...]
+        self.card_sections: list = []
         # Burn-in protection, set by the app before each paint: how far everything is shifted, how bright it is,
         # and how visible the trackpad hints still are.
         self.shift = (0.0, 0.0)
@@ -740,7 +760,8 @@ class PadController:
         icons = cfg.get("icons")
         self.icons = {key: name for key, name in icons.items() if isinstance(key, str) and isinstance(name, str) and name} \
             if isinstance(icons, dict) else {}
-        number_icons = bool(cfg.get("number_icons")) and bool(self.game.numbers)
+        self.number_pad = number_pad_mode(cfg)
+        number_icons = self.number_pad == "icons" and bool(self.game.numbers)
         if number_icons != self.number_icons:
             # The number keys change shape: let go of what they hold.
             self._release_touches()
@@ -777,9 +798,9 @@ class PadController:
         return self.icons.get(key) or self.wow_bars.get(key, {}).get("picture", "")
 
     def name_of(self, slot: Slot, swipe: str | None = None) -> str:
-        """In icon mode, the name of what a number, or one of its swipes, holds on the WoW action bars ("Lightning
-        Bolt"), for a key without a picture; "" where the bars say nothing."""
-        return self.wow_bars.get(icon_id(slot, swipe), {}).get("name", "") if self.number_icons else ""
+        """The name of what a number, or one of its swipes, holds on the WoW action bars ("Lightning Bolt"), shown on a
+        key without a picture, in names and icon mode; "" where the bars say nothing."""
+        return self.wow_bars.get(icon_id(slot, swipe), {}).get("name", "") if self.number_pad != "numbers" else ""
 
     def number_label(self, widget: Widget) -> str:
         """What a number key is labelled: its key, or ^ for = while the WoW addon's Japanese keyboard bindings are on."""
@@ -1183,15 +1204,40 @@ class PadController:
 
     # ------------------------------------------------------------------ touches
 
+    def set_card(self, opened: bool) -> None:
+        """Open or close the status card."""
+        if opened == self.card_open:
+            return
+        self.card_open = opened
+        if opened:
+            self.card_opened = self._clock()
+        self.on_card(opened)
+        self.on_change()
+
+    def expire_card(self) -> None:
+        """Close the status card once it has been open CARD_S. The app asks once a second."""
+        if self.card_open and self._clock() - self.card_opened >= CARD_S:
+            self.set_card(False)
+
     def touch_down(self, tid: int, x: float, y: float, ts: float) -> None:
         self._expired.discard(tid)
+        if self.card_open:
+            # The status card covers the pad: a touch anywhere closes it and does nothing else, so that a tap meant
+            # for closing it never presses the button under it.
+            self.touches[tid] = Touch(None, ts, x, y, start_x=x, start_y=y, moving=ts)
+            self.haptic("tick")
+            self.set_card(False)
+            return
         widget = self._open_radial() or self.widget_at(x, y)
         self.last_touch = (x, y, widget.id if widget else "")
         touch = Touch(widget, ts, x, y, start_x=x, start_y=y, moving=ts)
         self.touches[tid] = touch
         if widget is None or widget.kind == "status":
             touch.widget = None
-            if self.view == "settings":
+            if widget is not None:
+                self.haptic("tick")
+                self.set_card(True)
+            elif self.view == "settings":
                 self.on_change()
             return
         kind = widget.kind

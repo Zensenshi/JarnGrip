@@ -58,6 +58,7 @@ WOW_SEARCH_S = 30.0
 LOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "jarngrip.lock"
 RESTORE_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada-bottom-screen.service"))
 TOUCH_RETRY_S = 3
+NETWORK_S = 3.0  # while the status card is open, how often it asks NetworkManager again (on a thread: nmcli is slow)
 RADIAL_FRAME_MS = 16  # repaints while a radial blooms
 FADE_FRAME_MS = 50    # repaints while a swipe's square fades: slow, but smooth enough for a fade
 
@@ -169,9 +170,17 @@ class PadApp:
         self._wow_inputs: tuple = (False, {}, None)
         self._wow_wake = threading.Event()
         self._logged_size: tuple = ()
+        # The status card's facts. The battery's rate is averaged all the time, so the card's time left is ready when
+        # it opens; the network is read on a thread of its own while the card is open (_read_network).
+        self._battery_rate = system_status.BatteryRate()
+        self._battery: dict | None = None
+        self._network: dict | None = None
+        self._network_busy = False
+        self._network_asked = 0.0
         self.pad = PadController(self.bridge, self.gesture, on_change=self._changed,
                                  on_close=lambda: GLib.idle_add(self._close_pad), haptic=self.haptics.pulse,
-                                 on_theme=lambda theme: GLib.idle_add(self._save_theme, theme), later=self._later)
+                                 on_theme=lambda theme: GLib.idle_add(self._save_theme, theme), later=self._later,
+                                 on_card=lambda opened: GLib.idle_add(self._card_changed, opened))
         # The game first: the page is looked up among its tabs.
         cfg = load_config()
         self.pad.apply_config(cfg)
@@ -333,7 +342,46 @@ class PadApp:
         if status_info != self.pad.status_info:
             self.pad.status_info = status_info
             self.area.queue_draw()
+        self._battery = system_status.read_battery_details()
+        self._battery_rate.add(self._battery, time.monotonic())
+        with self.lock:
+            self.pad.expire_card()
+        self._refresh_card()
         return True
+
+    # ------------------------------------------------------------------ status card
+
+    def _card_changed(self, opened: bool) -> bool:
+        if opened:
+            self._network = None  # "Looking…" until it is read again: an old address could mislead
+            self._network_asked = 0.0
+            self._refresh_card()
+        return False
+
+    def _refresh_card(self) -> bool:
+        """While the status card is open: ask for the network every NETWORK_S, and show what is known."""
+        if not self.pad.card_open:
+            return False
+        now = time.monotonic()
+        if not self._network_busy and now - self._network_asked >= NETWORK_S:
+            self._network_busy, self._network_asked = True, now
+            threading.Thread(target=self._read_network, name="network", daemon=True).start()
+        sections = system_status.card_sections(self._network, self._battery, self._battery_rate.hours(self._battery),
+                                               system_status.read_temperatures(), system_status.read_fan())
+        if sections != self.pad.card_sections:
+            self.pad.card_sections = sections
+            self.area.queue_draw()
+        return False
+
+    def _read_network(self) -> None:
+        try:
+            network = system_status.read_network()
+        except Exception as err:  # a surprise in nmcli's output must not leave the card looking for ever
+            self._log_error(DebugCode.ERR_STATUS_CARD, f"network: {type(err).__name__}: {err}")
+            network = {"kind": "", "ip": "", "internet": ""}
+        self._network = network
+        self._network_busy = False
+        GLib.idle_add(self._refresh_card)
 
     def _update_backdrop(self, cfg: dict) -> None:
         """Make the Game Glass backdrop when that theme is on and its picture or blur changed; drop it otherwise."""
@@ -359,8 +407,9 @@ class PadApp:
         self.pad.backdrop = backdrop or pad_draw.default_backdrop(halvings)
 
     def _wow_wanted(self) -> bool:
-        pad = self.pad
-        return pad.game.id == "wow" and pad.number_icons and self._config.get("wow_bars", True) is not False
+        # In every number pad mode, numbers included: the names are only shown in the others (name_of), but the
+        # = key is labelled ^ in all of them while the addon's Japanese keyboard bindings are on.
+        return self.pad.game.id == "wow" and self._config.get("wow_bars", True) is not False
 
     def _ask_wow_bars(self) -> None:
         """Wake the WoW bars' thread with what it needs, or, where they are not wanted, forget them."""
@@ -503,8 +552,11 @@ class PadApp:
             f"Touch: {self.touch_status}",
             f"Trackpad sensitivity: {self.gesture.sensitivity:.1f}",
             f"Haptics: {self.haptics.status}",
-            "Swipe a number up for Shift, down for Ctrl, or left to cancel it.",
         ]
+        game = self.pad.game
+        if game.numbers:
+            info.append(f"Swipe a number up for {game.swipes['up'][0]}, left for {game.swipes['down'][0]}, "
+                        "or down to cancel it.")
         if info != self.pad.info_lines:
             self.pad.info_lines = info
             if self.pad.view == "settings":

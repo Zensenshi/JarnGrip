@@ -116,6 +116,12 @@ function Section({id,title,summary,children}){
 // the one mounted now hears of each change (listeners).
 const remap={control:"character",combo:null,listeners:new Set()};
 const setRemap=patch=>{Object.assign(remap,patch);remap.listeners.forEach(f=>f())};
+// What the number keys show (the config's number_pad, as main.py keeps it). FFXI has no addon to name its keys, so
+// names there are its numbers, and the panel says so.
+const PAD_MODES=["numbers","names","icons"];
+const padMode=cfg=>{const m=PAD_MODES.includes(cfg.number_pad)?cfg.number_pad:cfg.number_icons?"icons":"names";return m==="names"&&cfg.game!=="wow"?"numbers":m};
+const padModeOptions=cfg=>[{data:"numbers",label:"Numbers"},...(cfg.game==="wow"?[{data:"names",label:"Spell names"}]:[]),{data:"icons",label:"Icons"}];
+const padModeLabel=cfg=>({numbers:"Numbers",names:"Spell names",icons:"Icons"})[padMode(cfg)];
 function Content(){
  const [status,setStatus]=SP_REACT.useState({enabled:false});
  const [cfg,setCfg]=SP_REACT.useState({game:"wow",bindings:{},profiles:{},active_profile:"Default",sensitivity:1,theme:"classic",haptics:true,haptics_strength:1,burn_in:true,clock_24h:false,desktop_mode:false});
@@ -194,8 +200,8 @@ function Content(){
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:saveMapping,children:`Save: ${comboText(combo)}`})}),
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:()=>writeBinding(null),children:"Reset to default"})}),
    ...(cfg.game==="desktop"?[]:[jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Number block",description:`Number 1 to number = are the number block. A swipe on a number adds ${gameOf(cfg).swipes[0]} (up) or ${gameOf(cfg).swipes[1]} (left) to what it sends; down cancels it.${cfg.game==="ffxi"?" Ctrl and Alt bring up FFXI's two macro bars.":""}`})},"numbers")])]}),
-  ...(cfg.game==="desktop"?[]:[jsx(Section,{id:"icons",title:"Number pad icons",summary:[cfg.number_icons?"Icons on":"Icons off",cfg.game==="wow"&&cfg.number_icons&&cfg.wow_bars!==false?"WoW action bars":""].filter(Boolean).join(" · "),children:[
-   jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:"Show icons",description:"Square number keys with your own pictures on them, like a Stream Deck, and one for each swipe. Each profile keeps its own.",checked:!!cfg.number_icons,onChange:v=>setSetting("number_icons",v)})}),
+  ...(cfg.game==="desktop"?[]:[jsx(Section,{id:"icons",title:"Number pad icons",summary:[padModeLabel(cfg),cfg.game==="wow"&&padMode(cfg)!=="numbers"&&cfg.wow_bars!==false?"WoW action bars":""].filter(Boolean).join(" · "),children:[
+   jsx(DFL.PanelSectionRow,{children:jsx(DFL.Field,{label:"Number keys show",description:cfg.game==="wow"?"Spell names: what each key casts in WoW, with the JarnGrip addon, or else its number. Icons: square keys with your own pictures, like a Stream Deck, or else the spell's icon or name. Each profile keeps its own pictures.":"Icons: square keys with your own pictures, like a Stream Deck. Each profile keeps its own pictures.",childrenLayout:"below",childrenContainerWidth:"max",children:jsx(DFL.Dropdown,{selectedOption:padMode(cfg),rgOptions:padModeOptions(cfg),onChange:opt=>setSetting("number_pad",opt.data)})})},"numberpad"),
    ...(cfg.game==="wow"?[jsx(DFL.PanelSectionRow,{children:jsx(DFL.ToggleField,{label:"Use my WoW action bars",description:"With the JarnGrip addon in WoW, a key without a picture of its own shows the icon of what it casts in the game, or its name. See the guide.",checked:cfg.wow_bars!==false,onChange:v=>setSetting("wow_bars",v)})},"wowbars")]:[]),
    jsx(DFL.PanelSectionRow,{children:jsx(DFL.ButtonItem,{layout:"below",onClick:openIconPage,disabled:!api.routerHook,description:api.routerHook?"Opens a full-screen page to pick a picture for each number and its swipes.":"This version of Decky cannot open the icon page. Set the icons in ~/.config/jarngrip/config.json (see the guide).",children:"Edit icons…"})})]},"icons")]),
   jsx(Section,{id:"more",title:"Stop and uninstall",summary:"Give the bottom screen back, or remove JarnGrip",children:[
@@ -276,7 +282,7 @@ function IconPage(){
  const barsLine=cfg.game!=="wow"||cfg.wow_bars===false?"":bars.character?`WoW bars: ${bars.character}${bars.spec?` (${bars.spec})`:""}, saved ${ago(bars.saved)}. A picture you pick here wins over WoW's; clear it to show WoW's again.${!bars.icon_list&&Object.values(bars.keys||{}).some(w=>!w.picture)?` Some have no picture: put icon-names.csv in ${files.folder} to match pictures named for WoW's icons (see the guide).`:""}`:bars.file?`WoW bars: ${bars.file} has no action bars in it yet. Type /reload in WoW, or /jarngrip to see what the addon saw.`:"WoW bars: nothing saved yet. Install the JarnGrip addon in WoW, then type /reload in the game (see the guide).";
  return jsxs("div",{style:PAGE_STYLE,children:[
   jsx("h2",{style:{margin:"0 0 4px"},children:`Number pad icons · ${gameOf(cfg).name} · profile ${cfg.active_profile||"Default"}`}),
-  jsx("div",{style:{opacity:.7,marginBottom:16},children:message||(cfg.number_icons?"Saved as you pick. Save the profile in the JarnGrip panel to keep them with it.":"Icons are off: turn on Show icons in the JarnGrip panel to see them on the pad.")}),
+  jsx("div",{style:{opacity:.7,marginBottom:16},children:message||(padMode(cfg)==="icons"?"Saved as you pick. Save the profile in the JarnGrip panel to keep them with it.":`The number keys show ${padModeLabel(cfg).toLowerCase()}: pick Icons under Number keys show in the JarnGrip panel to see your pictures on the pad.`)}),
   barsLine?jsx("div",{style:{opacity:.7,marginBottom:16,fontSize:13},children:barsLine}):null,
   jsxs("div",{style:{display:"flex",gap:40,alignItems:"flex-start"},children:[
    jsx(DFL.Focusable,{style:{display:"grid",gridTemplateColumns:"repeat(3, 96px)",gap:10,flex:"none"},children:numberOptions.map(key)}),

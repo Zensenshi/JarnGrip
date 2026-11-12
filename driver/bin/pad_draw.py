@@ -12,9 +12,9 @@ from dataclasses import dataclass, fields
 
 import cairo
 
-from pad_model import (BODY_Y, KEY_TEXT, KEY_WORD_TEXT, MARGIN, PANEL_PAD, RADIAL_CANCEL, RADIAL_DIRECTIONS, RADIAL_GROW,
-                       RADIAL_HUB, SWIPE_SIDES, THEME_IDS, THEME_Y, H, W, PadController, Widget, radial_reach,
-                       swipe_square)
+from pad_model import (BODY_Y, GAP, KEY_TEXT, KEY_WORD_TEXT, MARGIN, PANEL_PAD, RADIAL_CANCEL, RADIAL_DIRECTIONS,
+                       RADIAL_GROW, RADIAL_HUB, SWIPE_SIDES, THEME_IDS, THEME_Y, H, W, PadController, Widget,
+                       radial_reach, swipe_square)
 
 
 def _rgb(value: int) -> tuple:
@@ -656,10 +656,11 @@ def _in_clip(boxes: list | None, x: float, y: float, w: float, h: float) -> bool
                                 for bx, by, bw, bh in boxes)
 
 
-def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
+def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str, name: bool = False) -> None:
     """What lifting the finger will send from a swiped number (or a target's Enter): a rounded fan opening from the
-    button in the swipe's direction, with the modifier (label) written large in it. Where the screen ends first (down,
-    on the bottom row), the fan is shorter and its lettering smaller, but it stays whole and on the screen."""
+    button in the swipe's direction, with the modifier (label) written large in it, or, if name, what it casts on the
+    WoW action bars, on up to two lines. Where the screen ends first (down, on the bottom row), the fan is shorter and
+    its lettering smaller, but it stays whole and on the screen."""
     cancel = swipe == "cancel"
     color = t.danger_text if cancel else t.text_pressed
     top, bottom = t.danger if cancel else t.pressed
@@ -698,8 +699,9 @@ def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
     else:
         # Up or down: the lettering runs across the fan, FAN_LABEL_PAD from its sides where it sits.
         max_w = 2 * label_at * math.sin(FAN_SPREAD) - 2 * FAN_LABEL_PAD
-    _text(cr, t, cx + label_at * math.cos(angle), cy + label_at * math.sin(angle), [label], size, color,
-          max(max_w, 60.0))
+    max_w = max(max_w, 60.0)
+    lines, size = _name_lines(cr, t, label, size, max_w, 2) if name else ([label], size)
+    _text(cr, t, cx + label_at * math.cos(angle), cy + label_at * math.sin(angle), lines, size, color, max_w)
 
 
 def _picture(cr, icon, x: float, y: float, size: float, radius: float, tint: tuple | None = None) -> None:
@@ -760,8 +762,8 @@ def _name_lines(cr, t: Theme, name: str, size: float, max_w: float, max_lines: i
 
 
 def _named_key(cr, t: Theme, w: Widget, name: str, lit: bool, label: str) -> None:
-    """A number key in icon mode without a picture, whose key holds something on the WoW action bars: its name, as
-    big as fits on up to three lines, under the number small in the top left corner."""
+    """A number key without a picture, in names or icon mode, whose key holds something on the WoW action bars: its
+    name, as big as fits on up to three lines, under the number small in the top left corner."""
     _face(cr, t, w.x, w.y, w.w, w.h, active=lit, raised=True)
     inset = 5 * t.trim + 4
     size = min(w.w, w.h) - 2 * inset
@@ -1084,6 +1086,55 @@ def _settings(cr, t: Theme, pad: PadController) -> None:
           1140, alpha=0.6)
 
 
+CARD_PAD = 28.0       # inside the status card's edge
+CARD_HEAD = 50.0      # a section's heading
+CARD_ROW = 44.0       # one of its lines
+CARD_FOOT = 44.0      # "Tap anywhere to close"
+CARD_SCRIM = 0.45     # how much the open card darkens the pad behind it
+CARD_TEXT = 26.0
+
+
+def _text_at(cr, t: Theme, x: float, y: float, text: str, size: float, color: tuple, max_w: float, right: bool = False,
+             alpha: float = 1.0) -> float:
+    """One line of lettering starting at x, or ending there if right; it shrinks until it fits in max_w. Returns its
+    width."""
+    _fit(cr, t, [text], size, max_w)
+    width = cr.text_extents(text).width
+    _text(cr, t, x - width / 2 if right else x + width / 2, y, [text], size, color, max_w, alpha)
+    return width
+
+
+def card_box(pad: PadController) -> tuple:
+    """(x, y, w, h) of the status card: the pad's width, under the header, as tall as its longest section."""
+    rows = max((len(lines) for _, lines in pad.card_sections), default=1)
+    return MARGIN, BODY_Y, W - 2 * MARGIN, 2 * CARD_PAD + CARD_HEAD + rows * CARD_ROW + CARD_FOOT
+
+
+def _card(cr, t: Theme, pad: PadController) -> None:
+    """The status card a tap on the clock opens: a column per section (network, battery, temperatures), each line a
+    label on the left and its value on the right, over the pad darkened behind it."""
+    cr.set_source_rgba(0, 0, 0, CARD_SCRIM)
+    cr.paint()
+    x, y, w, h = card_box(pad)
+    _face(cr, t, x, y, w, h, radius=26, raised=True)
+    sections = pad.card_sections or [("Status", [])]
+    col_gap = 2 * GAP + 16
+    col_w = (w - 2 * CARD_PAD - (len(sections) - 1) * col_gap) / len(sections)
+    for i, (heading, lines) in enumerate(sections):
+        cx = x + CARD_PAD + i * (col_w + col_gap)
+        if i:
+            cr.set_source_rgba(*t.text, 0.18)
+            cr.rectangle(cx - col_gap / 2 - 1, y + CARD_PAD, 2, h - 2 * CARD_PAD - CARD_FOOT)
+            cr.fill()
+        _text_at(cr, t, cx, y + CARD_PAD + CARD_HEAD / 2, heading, 30, t.border_bright, col_w)
+        for r, (label, value) in enumerate(lines):
+            ly = y + CARD_PAD + CARD_HEAD + (r + 0.5) * CARD_ROW
+            used = _text_at(cr, t, cx, ly, label, CARD_TEXT - 2, t.text, col_w * 0.45, alpha=0.65)
+            _text_at(cr, t, cx + col_w, ly, value, CARD_TEXT, t.text, col_w - used - 16, right=True)
+    _text(cr, t, x + w / 2, y + h - CARD_PAD - CARD_FOOT / 2, ["Tap anywhere to close"], 22, t.text, w - 40,
+          alpha=0.55)
+
+
 def paint(cr, pad: PadController) -> None:
     global _backdrop, _shift
     t = THEMES.get(pad.theme, THEMES["classic"])
@@ -1140,10 +1191,13 @@ def _paint_pad(cr, t: Theme, pad: PadController) -> None:
             if pad.number_icons:
                 _swipe_petals(cr, t, pad, widget, swipe)
             else:
-                _swipe_fan(cr, t, widget, swipe, _swipe_word(pad, swipe))
+                name = pad.name_of(widget.data, swipe) if swipe != "cancel" else ""
+                _swipe_fan(cr, t, widget, swipe, name or _swipe_word(pad, swipe), bool(name))
         elif widget.kind == "page" and widget.id in swipes and not widget.data.radial:
             _swipe_fan(cr, t, widget, "confirm", "Enter")
     # An open radial goes over everything, fans included.
     for widget in pad.widgets:
         if widget.kind == "page" and widget.data.radial and widget.id in swipes:
             _radial(cr, t, widget, swipes[widget.id], pad.radial_growth())
+    if pad.card_open:
+        _card(cr, t, pad)

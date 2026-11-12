@@ -80,6 +80,9 @@ class DebugCode(IntEnum):
     HAPTICS_OK = 800
     ERR_HAPTICS = 801           # no motor found, or it could not be opened or driven
 
+    # 9xx: The status card (network, battery, temperatures)
+    ERR_STATUS_CARD = 901       # what it shows could not be read
+
 
 CODE_DESCRIPTIONS: dict[DebugCode, str] = {
     DebugCode.OK: "Healthy",
@@ -127,6 +130,7 @@ CODE_DESCRIPTIONS: dict[DebugCode, str] = {
     DebugCode.ERR_PIPEWIRE_WPCTL: "PipeWire wpctl execution failure",
     DebugCode.HAPTICS_OK: "Vibration motor in use",
     DebugCode.ERR_HAPTICS: "Haptics unavailable",
+    DebugCode.ERR_STATUS_CARD: "Status card facts unreadable",
 }
 
 
