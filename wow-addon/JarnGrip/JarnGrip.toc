@@ -1,0 +1,8 @@
+## Interface: 120107, 120105, 120001, 120000, 110207, 16001, 50504, 20506, 11509
+## Title: JarnGrip
+## Notes: Saves what your action bar keys hold, for the JarnGrip touch pad's number keys. Sends no keys. /jarngrip jis: Japanese keyboard bindings on a US keyboard.
+## Author: Zensenshi
+## SavedVariables: JarnGripDB
+## Category: Action Bars
+
+JarnGrip.lua

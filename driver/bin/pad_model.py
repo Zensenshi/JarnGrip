@@ -7,8 +7,8 @@ second-screen pad of AYN-Thor-WoW-Launcher (https://github.com/wyattabuntjer/AYN
 - A page button is a real key: finger down presses it, finger up releases it, and several can be held at once. A few
   of FFXI's send one keystroke per touch instead (the macro sets), and its party targets press Enter after a swipe right.
   So do the Desktop shortcuts that must not repeat while a thumb rests on them, such as Close tab, but at once.
-- A number button sends its key when the finger lifts, which lets a swipe change it: up and down add the game's two
-  modifiers (Shift and Ctrl for WoW, Ctrl and Alt for FFXI's two macro bars), and left cancels it.
+- A number button sends its key when the finger lifts, which lets a swipe change it: up and left add the game's two
+  modifiers (Shift and Ctrl for WoW, Ctrl and Alt for FFXI's two macro bars), and down cancels it.
 - The trackpad's click buttons hold while pressed, so they drag; a double tap keeps one held until it is tapped again.
 - The trackpad view's Shift, Ctrl and Alt are armed by a tap (they let go after the next click), locked by a double
   tap, and cleared by a tap.
@@ -20,13 +20,17 @@ second-screen pad of AYN-Thor-WoW-Launcher (https://github.com/wyattabuntjer/AYN
 - The Desktop profile, for everything that is not a game, has no number block: its pages take the whole width, two
   columns each. Its keyboard has F1 to F12, Super and the arrows in place of its small trackpad, and its trackpad Back,
   Copy, Paste and Forward in place of the modifiers, and pinch to zoom.
+- With number pad icons on, the number keys are square and show the player's own pictures, like a stream deck: one for
+  the tap and one for each swipe. A swipe opens squares around the key in place of the fan, with their icons: the first
+  modifier's above it, the second's left of it, cancel's below, the one swiped toward lit. A modifier's square fades
+  for SWIPE_FADE_S after the key is sent. Only the drawing changes: the keys send what they always did.
 """
 from __future__ import annotations
 
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from engine import BTN_LEFT, BTN_RIGHT, HI_RES_NOTCH, SCREEN_HEIGHT, SCREEN_WIDTH, STALE_CONTACT_S
@@ -71,6 +75,11 @@ RADIAL_HUB = 80.0           # the hub's radius: lifting in it chooses nothing
 RADIAL_REACH = 320.0        # a slice's outer radius, where the screen leaves room
 RADIAL_GROW = 28.0          # how much further the chosen slice reaches
 RADIAL_BUTTON_R = 150.0     # the round button that opens a radial
+# Which way each swipe on a number goes, and where its fan or square opens: "up" and "down" name the game's first and
+# second modifiers (as icons are saved: "slot_5:up"), reached by swiping up and left; swiping down cancels.
+SWIPE_SIDES = {"up": "up", "down": "left", "cancel": "down"}
+SWIPE_FADE_S = 2.0  # in icon mode, a modifier's square fades for this long after its key is sent
+SWIPE_GROW = 1.35   # in icon mode, how much bigger than the key a modifier's square is (cancel's is the key's size)
 RADIAL_OPEN_S = 0.28        # how long a radial takes to bloom
 
 # Layout, in bottom-screen pixels.
@@ -124,6 +133,9 @@ class Slot:
     keyboard: bool = False  # a radial whose slices open a chat box: the keyboard comes up after one is chosen
     icon: str = ""          # drawn in place of the label, on a radial's slice
     once: bool = False      # one keystroke per touch, let go at once: a held key would repeat (Close tab, Paste)
+    picture: str = ""       # a bundled button icon (driver/icons/<picture>.png) in place of the label, where it is
+    tag: str = ""           # written beside the icon: what tells apart buttons that share one (Party 1 to 4)
+    color: int = 0          # the label's own color (0xRRGGBB) in place of the theme's: a chat channel's, as in the game
 
 
 def _id(label: str) -> str:
@@ -135,15 +147,25 @@ def _page(label: str, key: int, *mods: int, tap: bool = False, confirm: bool = F
     return Slot(_id(label), label, key, mods, tap, confirm, icon=icon, once=once)
 
 
-def _radial(label: str, keyboard: bool = False, **slices: Slot) -> Slot:
+def _radial(label: str, keyboard: bool = False, picture: str = "", **slices: Slot) -> Slot:
     assert set(slices) <= set(RADIAL_DIRECTIONS) - {RADIAL_CANCEL}
     return Slot(_id(label), label, 0, radial=tuple((d, slices[d]) for d in RADIAL_DIRECTIONS if d in slices),
-                keyboard=keyboard)
+                keyboard=keyboard, picture=picture)
 
 
-def _typed(label: str, text: str) -> Slot:
+def _typed(label: str, text: str, color: int = 0) -> Slot:
     """A radial slice that types a chat command. Its id is kept apart from the page buttons' (WoW has a Guild button)."""
-    return Slot(f"chat_{_id(label)}", label, 0, text=text)
+    return Slot(f"chat_{_id(label)}", label, 0, text=text, color=color)
+
+
+# WoW's own colors for its chat channels, as the chat window shows them before a player changes them.
+WOW_CHAT_COLORS = {"say": 0xFFFFFF, "yell": 0xFF4040, "whisper": 0xFF80FF, "party": 0xAAAAFF, "raid": 0xFF7F00,
+                   "instance": 0xFF7F00, "guild": 0x40FF40}
+
+
+def _channel(label: str, text: str) -> Slot:
+    """A WoW chat channel's slice, its name in the channel's color."""
+    return _typed(label, text, WOW_CHAT_COLORS[_id(label)])
 
 
 def _radial_in(entries: tuple) -> Slot | None:
@@ -178,11 +200,11 @@ NUMBER_SLOTS = tuple(
 
 @dataclass(frozen=True)
 class Game:
-    """A game the pad is laid out for: its page tabs and what a swipe up or down on a number adds."""
+    """A game the pad is laid out for: its page tabs and what a swipe up or left on a number adds."""
     id: str
     name: str
     pages: tuple    # (title, column, ...) per page tab, a column being (Slot or a row of Slots, ...)
-    swipes: dict    # "up" / "down" -> (label, modifier key codes)
+    swipes: dict    # "up" / "down" (swiped up / left: SWIPE_SIDES) -> (label, modifier key codes)
     numbers: tuple = NUMBER_SLOTS  # the number block, right of the pages; () for none
     trackpad: tuple = ()    # Slots in place of the trackpad's Shift, Ctrl and Alt
     gestures: bool = False  # pinch to zoom on the trackpad (GESTURE_PX)
@@ -221,9 +243,9 @@ WOW_PAGES = (
     ("Utility", (
         (_page("Sheathe weapons", 44), _page("Screenshot", 99)),
         _page("Sit / stand", 45),
-        _radial("Chat", keyboard=True, up=_typed("Guild", "/g "), up_right=_typed("Party", "/p "), right=_typed("Yell", "/y "),
-                down_right=_typed("Raid", "/ra "), down_left=_typed("Instance", "/i "), left=_typed("Say", "/s "),
-                up_left=_typed("Whisper", "/w ")),
+        _radial("Chat", keyboard=True, picture="chat_say", up=_channel("Guild", "/g "), up_right=_channel("Party", "/p "),
+                right=_channel("Yell", "/y "), down_right=_channel("Raid", "/ra "),
+                down_left=_channel("Instance", "/i "), left=_channel("Say", "/s "), up_left=_channel("Whisper", "/w ")),
         (_page("Chat page up", 104), _page("Chat page down", 109)),
     )),
 )
@@ -254,7 +276,21 @@ FFXI_PAGES = (
     )),
 )
 
-WOW = Game("wow", "World of Warcraft", WOW_PAGES,
+def _pictured(pages: tuple) -> tuple:
+    """Pages whose buttons show their icon (driver/icons/<id>.png) in place of their label. Party 1 to 4 share
+    party.png, with their number beside it. A radial keeps its own (and its slices their lettering)."""
+    def one(slot):
+        if slot is None or slot.radial:
+            return slot
+        party = re.fullmatch(r"party_(\d)", slot.id)
+        return replace(slot, picture="party", tag=party.group(1)) if party else replace(slot, picture=slot.id)
+
+    return tuple((title, *(tuple(tuple(one(s) for s in entry) if isinstance(entry, tuple) else one(entry)
+                                 for entry in column) for column in columns))
+                 for title, *columns in pages)
+
+
+WOW = Game("wow", "World of Warcraft", _pictured(WOW_PAGES),
            {"up": ("Shift", (KEY_LEFTSHIFT,)), "down": ("Ctrl", (KEY_LEFTCTRL,))})
 # FFXI's macro palette: Ctrl + 1 to 0 is its upper bar, Alt + 1 to 0 the lower one.
 FFXI = Game("ffxi", "Final Fantasy XI", FFXI_PAGES,
@@ -443,8 +479,9 @@ def _page_column(panels: list, widgets: list, entries: tuple, x: float, w: float
                                            col_w - 2 * PANEL_PAD, bh, split))
 
 
-def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) -> tuple:
-    """(panels, widgets) for a view. Panels are (x, y, w, h, strong): the faint gold backing behind a group."""
+def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW, square_numbers: bool = False) -> tuple:
+    """(panels, widgets) for a view. Panels are (x, y, w, h, strong): the faint gold backing behind a group.
+    square_numbers makes the number keys square, for their icons."""
     panels: list = []
     widgets: list = []
     full_w = W - 2 * MARGIN
@@ -522,7 +559,7 @@ def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) 
             # modifier row.
             rx = MARGIN + len(columns) * (col_w + GAP)
             key_w = (col_w - 2 * PANEL_PAD - 2 * GAP) / 3
-            row_h = min((BODY_H - 2 * PANEL_PAD - 3 * GAP) / 4, key_w * NUMBER_TALL)
+            row_h = min((BODY_H - 2 * PANEL_PAD - 3 * GAP) / 4, key_w * (1.0 if square_numbers else NUMBER_TALL))
             num_h = 4 * row_h + 3 * GAP + 2 * PANEL_PAD
             num_y = BODY_Y + (BODY_H - num_h) / 2
             panels.append((rx, num_y, col_w, num_h, True))
@@ -534,15 +571,42 @@ def build_layout(view: str, page: int, symbols: bool = False, game: Game = WOW) 
     return panels, widgets
 
 
+def icon_id(slot: Slot, swipe: str | None = None) -> str:
+    """What a number's icon is saved under: "slot_5" for its tap, "slot_5:up" and "slot_5:down" for its swipes."""
+    return f"{slot.id}:{swipe}" if swipe else slot.id
+
+
+def swipe_square(widget: Widget, swipe: str) -> tuple:
+    """Where a swipe's square opens beside a number in icon mode, as (x, y, size), one gap past the key the way the
+    swipe goes (SWIPE_SIDES): the first modifier's above it, the second's left of it, both SWIPE_GROW times the key's
+    size, and cancel's below, the key's size. The two modifiers' grow from the key's top left corner away from each
+    other, the first's to the right and the second's down, so that they never overlap. Kept on the screen, so the top
+    row's first goes over the page tabs and the top of its own key, and the bottom row's cancel over its own key."""
+    base = min(widget.w, widget.h)
+    kx, ky = widget.x + (widget.w - base) / 2, widget.y + (widget.h - base) / 2
+    side = SWIPE_SIDES[swipe]
+    size = base if side == "down" else base * SWIPE_GROW
+    x, y = {"up": (kx, ky - GAP - size), "left": (kx - GAP - size, ky), "down": (kx, ky + base + GAP)}[side]
+    edge = MARGIN / 2
+    x, y = min(max(x, edge), W - edge - size), min(max(y, edge), H - edge - size)
+    if side == "left":
+        # The top right key's first square is pushed left and down by the screen's edges, into this one's way: this
+        # one goes down below it.
+        ux, uy, usize = swipe_square(widget, "up")
+        if ux < x + size and uy + usize + GAP > y:
+            y = min(uy + usize + GAP, H - edge - size)
+    return x, y, size
+
+
 def swipe_of(dx: float, dy: float) -> str | None:
-    """What a finger's travel on a number button asks for: "up" or "down" (the game's two modifiers), "cancel" (left),
-    or None for a plain press. Right counts as a plain press: there is no room for a fan right of the right-hand
-    column."""
+    """What a finger's travel on a number button asks for (SWIPE_SIDES): "up" (swiped up: the game's first modifier),
+    "down" (swiped left: its second), "cancel" (swiped down), or None for a plain press. Right counts as a plain press:
+    there is no room for a fan right of the right-hand column."""
     if max(abs(dx), abs(dy)) <= SWIPE_PX:
         return None
     if abs(dy) >= abs(dx):
-        return "up" if dy < 0 else "down"
-    return "cancel" if dx < 0 else None
+        return "up" if dy < 0 else "cancel"
+    return "down" if dx < 0 else None
 
 
 def confirms(dx: float, dy: float) -> bool:
@@ -598,12 +662,12 @@ class PadController:
     """Pad state and touch handling. The bridge is engine.UInputBridge (or anything with key, mouse_button and
     emit_scroll); the gesture engine drives the pointer for touches on the trackpad surface."""
 
-    def __init__(self, bridge, gesture, on_change: Callable = lambda: None, on_close: Callable = lambda: None,
+    def __init__(self, bridge, gesture, on_change: Callable = lambda widget=None: None, on_close: Callable = lambda: None,
                  haptic: Callable = lambda pattern: None, on_theme: Callable = lambda theme: None,
                  clock: Callable = time.monotonic, sleep: Callable = time.sleep, later: Callable | None = None) -> None:
         self.bridge = bridge
         self.gesture = gesture
-        self.on_change = on_change  # something visible changed: redraw
+        self.on_change = on_change  # something visible changed: redraw; on_change(widget) when only its swipe did
         self.on_close = on_close    # "Close pad" was tapped
         self.haptic = haptic        # haptic(pattern): "press", "tick" or "lock" (see haptics.PATTERNS)
         self.on_theme = on_theme    # a theme was picked on the settings view: keep it
@@ -619,6 +683,15 @@ class PadController:
         self.kb_symbols = False
         self.kb_shift = "off"   # off, on (next key only), caps
         self.bindings: dict = {}
+        self.number_icons = False   # the number keys show icons (only in a game with a number block)
+        self.icons: dict = {}       # icon_id -> a picture's file name, in the game's icon folder
+        self.icon_surfaces: dict = {}  # file name -> its picture, square (pad_draw.make_icon); set by the app
+        # icon_id -> {"name", "picture"}: what the key holds on the player's WoW action bars (wow_bars.pad_bars); set
+        # by the app. A picture picked for the key wins over the bars'.
+        self.wow_bars: dict = {}
+        # Whether the WoW addon's Japanese keyboard bindings are on (wow_bars.last_character): the = key does what ^
+        # does on a JIS keyboard, and is labelled ^. Set by the app with wow_bars.
+        self.wow_jis = False
         self.tap_to_click = True
         self.theme = THEME_IDS[0]
         self.info_lines: list = []  # shown on the settings view
@@ -626,6 +699,8 @@ class PadController:
         self.touches: dict = {}         # tracking id -> Touch
         self.pressed: set = set()       # ids of the widgets with a finger on them
         self.flash_until: dict = {}     # widget id -> clock time until which it still draws as pressed
+        # In icon mode, number widget id -> (swipe, clock time it was sent): its square fades out (SWIPE_FADE_S).
+        self.swipe_echoes: dict = {}
         self.key_typed: dict = {}       # keyboard widget id -> the character it typed, for the preview over the finger
         self._expired: set = set()      # ids dropped as stale: the kernel may reuse them for a new finger
         self.key_refs: dict = {}        # key code -> how many holders want it down
@@ -662,6 +737,15 @@ class PadController:
             self._relayout()
         bindings = cfg.get("bindings")
         self.bindings = dict(bindings) if isinstance(bindings, dict) else {}
+        icons = cfg.get("icons")
+        self.icons = {key: name for key, name in icons.items() if isinstance(key, str) and isinstance(name, str) and name} \
+            if isinstance(icons, dict) else {}
+        number_icons = bool(cfg.get("number_icons")) and bool(self.game.numbers)
+        if number_icons != self.number_icons:
+            # The number keys change shape: let go of what they hold.
+            self._release_touches()
+            self.number_icons = number_icons
+            self._relayout()
         self.tap_to_click = bool(cfg.get("tap_to_click", True))
         theme = OLD_THEME_IDS.get(cfg.get("theme"), cfg.get("theme"))
         if theme in THEME_IDS:
@@ -684,6 +768,29 @@ class PadController:
 
     # ------------------------------------------------------------------ what the painter asks
 
+    def icon_of(self, slot: Slot, swipe: str | None = None) -> str:
+        """The file name of the icon a number, or one of its swipes, shows in icon mode: the one picked for it, or the
+        one of what it holds on the WoW action bars; "" for its lettering."""
+        if not self.number_icons:
+            return ""
+        key = icon_id(slot, swipe)
+        return self.icons.get(key) or self.wow_bars.get(key, {}).get("picture", "")
+
+    def name_of(self, slot: Slot, swipe: str | None = None) -> str:
+        """In icon mode, the name of what a number, or one of its swipes, holds on the WoW action bars ("Lightning
+        Bolt"), for a key without a picture; "" where the bars say nothing."""
+        return self.wow_bars.get(icon_id(slot, swipe), {}).get("name", "") if self.number_icons else ""
+
+    def number_label(self, widget: Widget) -> str:
+        """What a number key is labelled: its key, or ^ for = while the WoW addon's Japanese keyboard bindings are on."""
+        return "^" if self.wow_jis and widget.label == "=" else widget.label
+
+    def picture_names(self) -> set:
+        """The file names of every picture icon mode can show: those picked and those of the bars."""
+        if not self.number_icons:
+            return set()
+        return {*self.icons.values(), *(bar.get("picture") for bar in self.wow_bars.values())} - {"", None}
+
     def lit(self, widget: Widget) -> bool:
         return widget.id in self.pressed or self._clock() < self.flash_until.get(widget.id, 0.0)
 
@@ -695,6 +802,29 @@ class PadController:
         """A radial is open and still blooming: the app repaints until it has."""
         return self.radial_growth() < 1.0 and any(w.kind == "page" and w.data.radial and w.id in self.swipes
                                                   for w in self.widgets)
+
+    def swiping(self) -> list:
+        """The number and target buttons (Slot.confirm) a finger is on, whose swipe can change with any touch frame:
+        the app repaints their swipes' areas every frame until it lifts (pad_draw.swipe_areas). In game, a single redraw
+        asked for when the swipe changes direction waits its turn, and the fan or square lags behind the finger. It
+        only reads (the painter calls it, off the lock)."""
+        return [t.widget for t in list(self.touches.values()) if t.widget is not None
+                and (t.widget.kind == "number" or (t.widget.kind == "page" and t.widget.data.confirm))]
+
+    def echoes(self) -> list:
+        """In icon mode, the squares of modifiers just sent, fading: (widget, swipe, opacity from 1 down to 0). A key
+        swiped again shows its swipe instead. Read from copies: the touch thread may change them while this paints."""
+        now = self._clock()
+        echoes, swipes = dict(self.swipe_echoes), dict(self.swipes)
+        return [(w, swipe, 1.0 - (now - sent) / SWIPE_FADE_S) for w in self.widgets if w.id in echoes
+                and w.id not in swipes for swipe, sent in (echoes[w.id],) if now - sent < SWIPE_FADE_S]
+
+    def fading(self) -> bool:
+        """A swipe's square is still fading: the app repaints until it has gone. It only reads (the painter calls it,
+        off the lock): an echo that has gone is replaced by the key's next one (_commit_number), or cleared with the
+        view."""
+        now = self._clock()
+        return self.number_icons and any(now - sent < SWIPE_FADE_S for _, sent in list(self.swipe_echoes.values()))
 
     def glows(self, widget: Widget) -> bool:
         """True for the buttons an armed modifier will apply to: the click buttons."""
@@ -895,9 +1025,12 @@ class PadController:
     def _commit_number(self, widget: Widget, touch: Touch) -> None:
         """A number button's finger lifted: send its key, with the modifier its swipe chose, or nothing for a cancel."""
         swipe = swipe_of(touch.x - touch.start_x, touch.y - touch.start_y)
+        self.swipe_echoes.pop(widget.id, None)
         if swipe == "cancel":
             self.flash_until.pop(widget.id, None)  # nothing was sent: do not light it up
             return
+        if swipe and self.number_icons:
+            self.swipe_echoes[widget.id] = (swipe, self._clock())  # what was sent stays a moment, fading
         self._press_slot(widget.data, self.game.swipes[swipe][1] if swipe else ())()
 
     # ------------------------------------------------------------------ two-finger gestures
@@ -1007,11 +1140,12 @@ class PadController:
     # ------------------------------------------------------------------ views
 
     def _relayout(self) -> None:
-        self.panels, self.widgets = build_layout(self.view, self.page, self.kb_symbols, self.game)
+        self.panels, self.widgets = build_layout(self.view, self.page, self.kb_symbols, self.game, self.number_icons)
 
     def _set_view(self, view: str, page: int | None = None) -> None:
         """Show a view. Everything a finger was holding is let go first: its button is about to disappear."""
         self._release_touches()
+        self.swipe_echoes.clear()
         if view != self.view:
             self._release_all_modifiers()
             for code, button in self.mouse.items():
@@ -1148,7 +1282,7 @@ class PadController:
                 else:
                     self.swipes.pop(touch.widget.id, None)
                 self.haptic("tick")
-                self.on_change()
+                self.on_change(touch.widget)  # only its swipe changed: the app repaints just that
         elif touch.widget.kind == "page" and touch.widget.data.radial:
             touch.choosing = touch.choosing or math.hypot(x - touch.start_x, y - touch.start_y) > RADIAL_PX
             chosen = self._radial_choice(touch.widget, touch)

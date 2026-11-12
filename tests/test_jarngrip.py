@@ -169,6 +169,70 @@ def test_number_keys_are_not_much_taller_than_wide_and_are_centered():
     assert above > 0 and abs(above - below) < 1e-6
 
 
+def test_number_pad_icons_make_the_number_keys_square_and_still_fit_without_overlaps():
+    for game in (pad_model.WOW, pad_model.FFXI):
+        for page in range(len(game.pages)):
+            _, widgets = build_layout("pad", page, game=game, square_numbers=True)
+            numbers = [w for w in widgets if w.kind == "number"]
+            assert len(numbers) == 12 and all(abs(w.w - w.h) < 1e-6 for w in numbers)
+            for w in widgets:
+                assert w.x >= 0 and w.y >= 0 and w.x + w.w <= pad_model.W and w.y + w.h <= pad_model.H, w.id
+            for i, a in enumerate(widgets):
+                for b in widgets[i + 1:]:
+                    assert a.x + a.w <= b.x or b.x + b.w <= a.x or a.y + a.h <= b.y or b.y + b.h <= a.y, (a.id, b.id)
+
+
+def test_a_swipes_square_opens_the_way_it_was_swiped_and_on_the_screen():
+    for game in (pad_model.WOW, pad_model.FFXI):
+        _, widgets = build_layout("pad", 0, game=game, square_numbers=True)
+        numbers = [w for w in widgets if w.kind == "number"]
+        bottom = max(w.y for w in numbers)
+        for w in numbers:
+            up, second, cancel = (pad_model.swipe_square(w, swipe) for swipe in ("up", "down", "cancel"))
+            for x, y, size in (up, second, cancel):
+                assert 0 <= x and x + size <= pad_model.W and 0 <= y and y + size <= pad_model.H
+            # The modifiers' squares are bigger than the key, so that they stand out; cancel's is the key's size.
+            assert up[2] == second[2] == w.w * pad_model.SWIPE_GROW > w.w == cancel[2]
+            g, edge = pad_model.GAP, pad_model.MARGIN / 2
+            assert up[0] == min(w.x, pad_model.W - edge - up[2]), w.id  # from the key's left edge, right
+            assert abs(up[1] - max(edge, w.y - g - up[2])) < 1e-6, w.id  # above, the top row's over the tabs
+            assert abs(second[0] + second[2] + g - w.x) < 1e-6, w.id  # left of it, down from the key's top
+            assert second[1] == w.y or second[1] == up[1] + up[2] + g, w.id  # or below the first, pushed into its way
+            # The two never overlap, nor cover the cancel square.
+            for a, b in ((up, second), (second, cancel)):
+                assert a[0] + a[2] <= b[0] or b[0] + b[2] <= a[0] or a[1] + a[2] <= b[1] or b[1] + b[2] <= a[1], w.id
+            assert cancel[0] == w.x  # below, or over the bottom row's own key
+            assert abs(cancel[1] - (w.y + w.h + g)) < 1e-6 if w.y < bottom else cancel[1] < w.y + w.h, w.id
+
+
+def test_icon_mode_leaves_the_number_block_where_it_was():
+    for game in (pad_model.WOW, pad_model.FFXI):
+        for page in range(len(game.pages)):
+            plain = {w.id: w for w in build_layout("pad", page, game=game)[1]}
+            icons = {w.id: w for w in build_layout("pad", page, game=game, square_numbers=True)[1]}
+            for key in (k for k in plain if k.startswith("number:")):
+                assert (icons[key].x, icons[key].w) == (plain[key].x, plain[key].w), key
+            for key in (k for k in plain if k.startswith("page:")):
+                assert (icons[key].x, icons[key].w) == (plain[key].x, plain[key].w), key
+
+
+def test_number_pad_icons_change_the_keys_shape_but_not_what_they_send():
+    pad, bridge, clock = make()
+    icons = {"slot_1": "fireball.png", "slot_1:up": "frostbolt.png", "slot_99": "x.png", "slot_2": 5}
+    pad.apply_config({"number_icons": True, "icons": icons})
+    one = next(w for w in pad.widgets if w.id == "number:slot_1")
+    assert one.w == one.h and pad.number_icons
+    assert (pad.icon_of(one.data), pad.icon_of(one.data, "up"), pad.icon_of(one.data, "down")) == \
+        ("fireball.png", "frostbolt.png", "")
+    assert "slot_2" not in pad.icons
+    swipe(pad, clock, "number:slot_1", 0, -120)
+    assert bridge.take() == [("key", SHIFT, True), ("key", 2, True), ("key", 2, False), ("key", SHIFT, False)]
+    pad.apply_config({"number_icons": False, "icons": icons})
+    assert pad.icon_of(one.data) == "" and next(w for w in pad.widgets if w.id == "number:slot_1").h > one.h
+    pad.apply_config({"game": "desktop", "number_icons": True, "icons": icons})
+    assert not pad.number_icons  # no number block
+
+
 def test_the_gap_between_two_buttons_belongs_to_one_of_them():
     pad, _, _ = make()
     a = next(w for w in pad.widgets if w.id == "number:slot_1")
@@ -239,13 +303,13 @@ def swipe(pad, clock, widget_id, dx, dy, steps=5):
     return shown
 
 
-def test_swiping_a_number_up_adds_shift_down_adds_ctrl_and_left_cancels():
+def test_swiping_a_number_up_adds_shift_left_adds_ctrl_and_down_cancels():
     pad, bridge, clock = make()
     assert swipe(pad, clock, "number:slot_5", 10, -90) == "up"
     assert bridge.take() == [("key", SHIFT, True), ("key", 6, True), ("key", 6, False), ("key", SHIFT, False)]
-    assert swipe(pad, clock, "number:slot_5", -10, 90) == "down"
+    assert swipe(pad, clock, "number:slot_5", -90, 10) == "down"  # the second modifier's swipe goes left
     assert bridge.take() == [("key", CTRL, True), ("key", 6, True), ("key", 6, False), ("key", CTRL, False)]
-    assert swipe(pad, clock, "number:slot_5", -90, 10) == "cancel"
+    assert swipe(pad, clock, "number:slot_5", -10, 90) == "cancel"
     assert bridge.take() == [] and not pad.lit(next(w for w in pad.widgets if w.id == "number:slot_5"))
     assert swipe(pad, clock, "number:slot_5", 90, 0) is None  # right is a plain press
     assert swipe(pad, clock, "number:slot_5", 30, 0) is None  # a wobble is not a swipe
@@ -253,13 +317,13 @@ def test_swiping_a_number_up_adds_shift_down_adds_ctrl_and_left_cancels():
     assert not pad.swipes
 
 
-def test_in_ffxi_a_swipe_up_reaches_the_ctrl_macro_bar_and_down_the_alt_one():
+def test_in_ffxi_a_swipe_up_reaches_the_ctrl_macro_bar_and_left_the_alt_one():
     pad, bridge, clock = make()
     pad.apply_config({"game": "ffxi"})
     assert pad.game.titles == ("Menus", "Target", "Utility")
     assert swipe(pad, clock, "number:slot_3", 0, -90) == "up"
     assert bridge.take() == [("key", CTRL, True), ("key", 4, True), ("key", 4, False), ("key", CTRL, False)]
-    assert swipe(pad, clock, "number:slot_10", 0, 90) == "down"
+    assert swipe(pad, clock, "number:slot_10", -90, 0) == "down"
     assert bridge.take() == [("key", ALT, True), ("key", 11, True), ("key", 11, False), ("key", ALT, False)]
     swipe(pad, clock, "number:slot_3", 0, 0)
     assert bridge.take() == [("key", 4, True), ("key", 4, False)]  # a tap is the bare number
@@ -516,6 +580,28 @@ def test_the_radial_repaints_only_while_open_and_blooming():
     assert pad.blooming()
     pad.touch_up(down(pad, clock, "page:chat"), clock.now)  # and a second closes it, before it has finished blooming
     assert pad.radial_growth() < 1.0 and not pad.blooming()
+
+
+def test_the_pad_repaints_every_frame_only_while_a_finger_is_on_a_swipeable_button():
+    pad, bridge, clock = make()
+    assert not pad.swiping()
+    tid = down(pad, clock, "number:slot_5")
+    assert pad.swiping()  # from the touch, before it is a swipe: the first change of direction shows at once
+    x, y = center(pad, "number:slot_5")
+    pad.touch_move(tid, x, y - 120, clock.now)
+    pad.touch_move(tid, x - 120, y, clock.now)
+    assert pad.swiping()
+    pad.touch_up(tid, clock.now)
+    assert not pad.swiping()
+    tid = down(pad, clock, "tab:2")
+    assert not pad.swiping()  # a page tab is not swiped
+    pad.touch_up(tid, clock.now)
+    pad.apply_config({"game": "ffxi"})
+    tap(pad, clock, "tab:1")
+    tid = down(pad, clock, "page:party_2")
+    assert pad.swiping()  # a target's swipe right confirms it
+    pad.touch_up(tid, clock.now)
+    assert not pad.swiping()
 
 
 def test_a_finger_that_takes_over_a_chat_radial_from_a_lost_lift_holds_nothing_on_the_keyboard():
@@ -1416,6 +1502,7 @@ def backend(tmp):
     main = importlib.import_module("main")
     main.CFG = Path(tmp) / "config.json"
     main.BACKGROUNDS = Path(tmp) / "Pictures"
+    main.ICONS = main.BACKGROUNDS / "Icons"
     main.APP_MENU = Path(tmp) / "applications" / "jarngrip.desktop"
     main.AUTOSTART = Path(tmp) / "autostart" / "jarngrip.desktop"
     main.UID, main.GID = os.getuid(), os.getgid()
@@ -2000,6 +2087,101 @@ def test_profiles_can_be_saved_switched_and_deleted():
         assert not call("save_profile", "x" * 25)["ok"]
 
 
+def test_number_pad_icons_are_kept_per_game_and_with_each_profile():
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        listed = call("list_icons")
+        assert listed == {"folder": str(Path(tmp) / "Pictures" / "Icons" / "wow"), "icons": []}
+        (Path(listed["folder"]) / "fireball.png").write_bytes(b"")
+        (Path(listed["folder"]) / "notes.txt").write_bytes(b"")
+        assert call("list_icons")["icons"] == ["fireball.png"]
+        icons = {"slot_1": "fireball.png", "slot_12:down": "later.webp", "slot_13": "a.png", "slot_1:left": "a.png",
+                 "slot_2": "../x.png", "slot_3": "notes.txt", "slot_4": ".png", "slot_5": ""}
+        cfg = call("save_config", {"number_icons": True, "icons": icons})["config"]
+        # A picture not in the folder yet is kept; anything that is not a number's or a swipe's picture is not.
+        assert cfg["icons"] == {"slot_1": "fireball.png", "slot_12:down": "later.webp"} and cfg["number_icons"]
+        call("save_profile", "Mage")
+        call("save_config", {"icons": {}})
+        assert call("select_profile", "Mage")["config"]["icons"] == {"slot_1": "fireball.png", "slot_12:down": "later.webp"}
+        assert call("select_profile", "Default")["config"]["icons"] == {}
+        call("select_profile", "Mage")
+        cfg = call("select_game", "ffxi")["config"]
+        assert (cfg["icons"], cfg["number_icons"]) == ({}, False)
+        assert call("list_icons")["folder"].endswith("/Icons/ffxi")
+        cfg = call("select_game", "wow")["config"]
+        assert (cfg["icons"]["slot_1"], cfg["number_icons"], cfg["active_profile"]) == ("fireball.png", True, "Mage")
+
+
+def test_the_icon_page_gets_small_pictures_themselves_and_big_ones_by_name():
+    import base64
+
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        folder = Path(call("list_icons")["folder"])
+        (folder / "fire.PNG").write_bytes(b"\x89PNG small")
+        (folder / "huge.jpg").write_bytes(b"x" * (256 * 1024 + 1))
+        assert call("list_icons")["icons"] == ["fire.PNG", "huge.jpg"]
+        previews = call("icon_previews", ["fire.PNG", "huge.jpg", "../config.json", "absent.png", 5])
+        assert previews == {"previews": {"fire.PNG": "data:image/png;base64,"
+                                         + base64.b64encode(b"\x89PNG small").decode()}, "more": []}
+        assert call("icon_previews", "fire.PNG") == {"previews": {}, "more": []}
+        names = [f"{i:04}.png" for i in range(300)]
+        for name in names:
+            (folder / name).write_bytes(b"x")
+        reply = call("icon_previews", names)  # a page at a time, never the whole folder: the rest is asked for next
+        assert len(reply["previews"]) == 200 and reply["more"] == names[200:]
+        # One reply holds at most PREVIEW_REPLY bytes of pictures, and always the first, so that every one comes.
+        big = [f"big{i}.png" for i in range(40)]
+        for name in big:
+            (folder / name).write_bytes(b"x" * (256 * 1024))
+        reply = call("icon_previews", big)
+        assert list(reply["previews"]) == big[:32] and reply["more"] == big[32:]
+        assert list(call("icon_previews", reply["more"])["previews"]) == big[32:]
+
+
+def test_pictures_named_for_a_number_and_swipe_fill_those_icons():
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        folder = Path(call("list_icons")["folder"])
+        names = ["5.png", "5-fireball.png", "5 Shift frostbolt.png", "minus_down.webp", "0-up-x.jpg", "2-alt.png",
+                 "7-upheaval.png", "2023-screenshot.png", "10.png", "equals.PNG", "frost_nova.png"]
+        for name in names:
+            (folder / name).write_bytes(b"")
+        call("save_config", {"icons": {"slot_5": "old.png", "slot_3": "keep.png"}})
+        result = call("fill_icons")
+        # The first by name wins a number; Alt is not one of WoW's swipes; "upheaval" is a name, not a swipe.
+        assert result["config"]["icons"] == {
+            "slot_3": "keep.png", "slot_5": "5-fireball.png", "slot_5:up": "5 Shift frostbolt.png",
+            "slot_11:down": "minus_down.webp", "slot_10:up": "0-up-x.jpg", "slot_7": "7-upheaval.png",
+            "slot_12": "equals.PNG"}
+        assert result["filled"] == 6
+        call("select_game", "ffxi")
+        folder = Path(call("list_icons")["folder"])
+        for name in ("1-ctrl.png", "1-alt.png", "1-shift.png"):
+            (folder / name).write_bytes(b"")
+        assert call("fill_icons")["config"]["icons"] == {"slot_1:up": "1-ctrl.png", "slot_1:down": "1-alt.png"}
+
+
+def test_the_backend_names_the_same_swipe_modifiers_as_the_pad():
+    import importlib
+
+    sys.path.insert(0, ROOT)
+    main = importlib.import_module("main")
+    for game_id, words in main.SWIPE_WORDS.items():
+        swipes = pad_model.GAMES[game_id].swipes
+        assert words == {swipes[swipe][0].lower(): swipe for swipe in ("up", "down")}, game_id
+    assert set(main.SWIPE_WORDS) == {g.id for g in pad_model.GAMES.values() if g.numbers}
+
+
+def test_the_decky_panel_never_sends_back_the_icons_the_icon_page_saved():
+    with open(os.path.join(ROOT, "dist", "index.js"), encoding="utf-8") as f:
+        panel = f.read()
+    content = panel[panel.index("function Content()"):panel.index("function IconPage()")]
+    # The side panel saves through saveConfig, which leaves the icons out; only the icon page sends them.
+    assert 'call("save_config"' not in content and "saveConfig(" in content
+    assert 'const saveConfig=c=>{const {icons,...rest}=c;return call("save_config",rest)}' in panel
+
+
 # ---------------------------------------------------------------------- painting
 
 class Anything:
@@ -2018,7 +2200,8 @@ def painter():
     """pad_draw, imported against a stand-in cairo, to run the drawing code without a display."""
     sys.modules.setdefault("cairo", types.SimpleNamespace(
         LinearGradient=lambda *a: Anything(), RadialGradient=lambda *a: Anything(), FONT_SLANT_NORMAL=0,
-        FONT_WEIGHT_BOLD=1, LINE_CAP_ROUND=1, LINE_JOIN_ROUND=1))
+        FONT_WEIGHT_BOLD=1, LINE_CAP_ROUND=1, LINE_JOIN_ROUND=1, FORMAT_ARGB32=0, ImageSurface=lambda *a: Anything(),
+        Context=lambda surface: Context()))
     import pad_draw
 
     return pad_draw
@@ -2067,6 +2250,69 @@ def test_a_theme_without_its_bundled_font_falls_back():
     assert pad_draw._font(pad_draw.THEMES["classic"]) == "Cinzel"
     assert pad_draw._font(pad_draw.THEMES["glass"]) == "Nunito"
     assert pad_draw._font(pad_draw.THEMES["charcoal"]) == "sans-serif"
+
+
+class Clipped(Context):
+    """A stand-in cairo context whose paint is clipped to a few boxes, as a redraw of a swipe's areas is."""
+
+    def __init__(self, boxes):
+        self.boxes = boxes
+
+    def copy_clip_rectangle_list(self):
+        return self.boxes
+
+
+def test_a_swipe_change_repaints_only_its_own_areas():
+    pad_draw = painter()
+    changes = []
+    pad, bridge, clock = make(on_change=lambda widget=None: changes.append(widget))
+    tid = down(pad, clock, "number:slot_5")
+    x, y = center(pad, "number:slot_5")
+    changes.clear()
+    pad.touch_move(tid, x, y - 90, clock.now)
+    pad.touch_move(tid, x - 90, y, clock.now)
+    five = next(w for w in pad.widgets if w.id == "number:slot_5")
+    assert changes == [five, five]  # the key's swipe changed, nothing else
+    pad.touch_up(tid, clock.now)
+    assert changes[-1] is None  # a lift repaints everything: the key may light up, its square fade
+
+    for icons in (False, True):
+        pad.apply_config({"number_icons": icons})
+        five = next(w for w in pad.widgets if w.id == "number:slot_5")
+        areas = pad_draw.swipe_areas(pad, five)
+        assert len(areas) == 4  # the key, and each swipe's fan or square
+
+        def inside(px, py):
+            return any(ax <= px <= ax + aw and ay <= py <= ay + ah for ax, ay, aw, ah in areas)
+
+        cx, cy = five.x + five.w / 2, five.y + five.h / 2
+        for swipe in ("up", "down", "cancel"):
+            if icons:  # every corner of each square
+                sx, sy, size = pad_model.swipe_square(five, swipe)
+                assert all(inside(sx + i * size, sy + j * size) for i in (0, 1) for j in (0, 1)), swipe
+            else:  # the far end of each fan
+                angle = pad_draw.FAN_DIRECTIONS[swipe]
+                outer = pad_draw._fan_outer(five, angle)
+                assert inside(cx + outer * math.cos(angle), cy + outer * math.sin(angle)), swipe
+
+        # Painted through those areas, only the widgets under them are drawn; with no clip, every one is.
+        drawn = []
+        real = pad_draw._widget
+        pad_draw._widget = lambda cr, t, p, w: drawn.append(w.id)
+        try:
+            tid = down(pad, clock, "number:slot_5")
+            pad.touch_move(tid, cx - 90, cy, clock.now)
+            pad_draw.paint(Clipped(areas), pad)
+            assert "number:slot_5" in drawn and "number:slot_4" in drawn  # the key, and its neighbour under the swipe
+            assert not any(w.startswith(("mode:", "tab:")) for w in drawn)  # far from it
+            clipped = len(drawn)
+            assert clipped < len(pad.widgets) / 2
+            drawn.clear()
+            pad_draw.paint(Context(), pad)
+            assert len(drawn) == len(pad.widgets) > clipped
+            pad.touch_up(tid, clock.now)
+        finally:
+            pad_draw._widget = real
 
 
 def test_every_view_paints():
@@ -2134,6 +2380,636 @@ def test_every_view_paints():
     clock.now += pad_model.RADIAL_OPEN_S
     pad.touch_move(tid, *slice_point(*center(pad, "page:media"), "down_left"), clock.now)
     pad_draw.paint(Context(), pad)
+
+
+def test_number_pad_icons_paint_with_and_without_their_pictures():
+    pad_draw = painter()
+    assert pad_draw.make_icon(Anything(), 300, 120) is not None
+    for theme in pad_model.THEME_IDS:
+        pad, bridge, clock = make()
+        pad.apply_config({"theme": theme, "number_icons": True,
+                          "icons": {"slot_1": "a.png", "slot_1:up": "b.png", "slot_10:down": "c.png", "slot_2": "gone.png"}})
+        pad.icon_surfaces = {name: Anything() for name in ("a.png", "b.png", "c.png")}
+        pad_draw.paint(Context(), pad)  # at rest: icons, and numbers where there are none
+        for widget_id, dx, dy in (("number:slot_1", 0, -90), ("number:slot_1", 0, 90), ("number:slot_1", -90, 0),
+                                  ("number:slot_10", 0, 90), ("number:slot_2", 0, -90)):
+            tid = down(pad, clock, widget_id)
+            x, y = center(pad, widget_id)
+            pad.touch_move(tid, x + dx, y + dy, clock.now)  # its square, pressed key and all
+            pad_draw.paint(Context(), pad)
+            pad.touch_up(tid, clock.now)
+            clock.now += 0.5
+
+
+# ---------------------------------------------------------------------------------------------- WoW action bars
+
+WOW_SAVED = r"""
+JarnGripDB = {
+["characters"] = {
+["Thrall - Area 52"] = {
+["keys"] = {
+["1"] = {
+["kind"] = "spell",
+["icon"] = 136048,
+["name"] = "Lightning Bolt",
+},
+["SHIFT-1"] = {
+["icon"] = "Interface\\Icons\\Spell_Nature_EarthShock",
+["name"] = "Earth Shock",
+},
+["CTRL-1"] = {
+["icon"] = 999999,
+["name"] = "Healing Stream Totem",
+},
+["2"] = {
+["icon"] = 135990,
+["name"] = "Caf\195\169 \"Special\"",
+},
+["CTRL-SHIFT-F1"] = {
+["name"] = "Hex",
+},
+["SHIFT-3"] = {
+["name"] = "Open/Close World Map",
+["kind"] = "binding",
+},
+},
+["spec"] = "Elemental",
+["saved"] = 1793000000,
+},
+["Old - Realm"] = {
+["keys"] = {
+["4"] = {
+["name"] = "Not me",
+},
+},
+},
+},
+["last"] = "Thrall - Area 52",
+["version"] = 1,
+}
+"""
+
+
+def test_the_wow_addons_file_is_read_as_data_and_nothing_else():
+    import wow_bars
+
+    saved = wow_bars.parse_saved_variables(WOW_SAVED + "\nOther = { 1, -2.5, 0x1F, true, nil, x = 'y\\65' ; } --[==[ a\n]==]")
+    assert saved["Other"] == {1: 1, 2: -2.5, 3: 31, 4: True, 5: None, "x": "yA"}
+    keys = saved["JarnGripDB"]["characters"]["Thrall - Area 52"]["keys"]
+    assert keys["2"]["name"] == 'Café "Special"' and keys["SHIFT-1"]["icon"].endswith("Spell_Nature_EarthShock")
+    for code in ('JarnGripDB = os.execute("rm -rf ~")', "JarnGripDB = { [1] = }", "JarnGripDB = {", "x = y"):
+        try:
+            wow_bars.parse_saved_variables(code)
+        except wow_bars.LuaError:
+            continue
+        raise AssertionError(f"accepted {code!r}")
+    bars = wow_bars.last_character(saved["JarnGripDB"])
+    assert (bars["character"], bars["spec"], bars["saved"]) == ("Thrall - Area 52", "Elemental", 1793000000)
+    assert "4" not in bars["keys"]  # another character's
+    assert wow_bars.last_character({}) == {} and wow_bars.last_character({"last": "x", "characters": {"x": 5}}) == {}
+
+
+def test_each_number_and_swipe_is_matched_to_the_key_it_sends_in_wow():
+    import wow_bars
+
+    bindings = {"slot_1": "ctrl+59", "slot_2": 33, "slot_3": "alt+shift+30", "slot_4": "f2"}
+    keys = wow_bars.slot_keys(bindings)
+    assert (keys["slot_5"], keys["slot_5:up"], keys["slot_5:down"]) == ("5", "SHIFT-5", "CTRL-5")
+    assert (keys["slot_11"], keys["slot_11:up"], keys["slot_12:down"]) == ("-", "SHIFT--", "CTRL-=")
+    assert (keys["slot_1"], keys["slot_1:up"], keys["slot_1:down"]) == ("CTRL-F1", "CTRL-SHIFT-F1", "CTRL-F1")
+    assert (keys["slot_2"], keys["slot_3:down"], keys["slot_4"]) == ("F", "ALT-CTRL-SHIFT-A", "4")
+    # The same keys the pad itself presses for them.
+    pad, bridge, clock = make()
+    pad.apply_config({"bindings": bindings})
+    for slot in pad_model.NUMBER_SLOTS:
+        for swipe in ("", "up", "down"):
+            key, mods = pad_model.combo_for(slot, pad.bindings)
+            extra = pad_model.WOW.swipes[swipe][1] if swipe else ()
+            assert keys[f"{slot.id}:{swipe}" if swipe else slot.id] == wow_bars.key_name(key, mods + extra)
+    assert wow_bars.key_name(999) == "" and "slot_1" not in wow_bars.slot_keys({"slot_1": 240})
+
+
+def test_the_wow_addons_file_is_found_where_wow_keeps_it_the_newest_first():
+    import wow_bars
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        assert wow_bars.find_file(home, home / "Icons") is None
+        wtf = "drive_c/Program Files (x86)/World of Warcraft/_retail_/WTF/Account/123#1/SavedVariables"
+        steam = home / ".local/share/Steam/steamapps/compatdata/4242/pfx" / wtf / "JarnGrip.lua"
+        lutris = home / "Games/battlenet" / wtf.replace("_retail_", "_forever_") / "JarnGrip.lua"
+        copy = home / "Icons" / "JarnGrip.lua"
+        for i, path in enumerate((steam, lutris, copy)):
+            path.parent.mkdir(parents=True)
+            path.write_text(WOW_SAVED)
+            os.utime(path, (1000 + i, 1000 + i))
+        assert wow_bars.find_file(home, home / "Icons") == copy
+        os.utime(steam, (5000, 5000))
+        assert wow_bars.find_file(home, home / "Icons") == steam
+        assert wow_bars.read_file(steam)["last"] == "Thrall - Area 52"
+        steam.write_text("JarnGripDB = {")
+        assert wow_bars.read_file(steam) == {} and wow_bars.read_file(home / "absent.lua") == {}
+
+
+def test_a_keys_wow_icon_finds_its_picture_by_icon_or_by_name():
+    import wow_bars
+
+    with tempfile.TemporaryDirectory() as tmp:
+        names_file = Path(tmp) / "icon-names.csv"
+        names_file.write_text("136048;interface/icons/spell_nature_lightning.blp\n1;interface/cinematics/logo.avi\n"
+                              "135990;Interface/Icons/Spell_Frost_FrostBolt02.blp\n")
+        names = wow_bars.read_icon_names(names_file)
+        assert names == {136048: "spell_nature_lightning", 135990: "spell_frost_frostbolt02"}
+        pictures = ["Spell_Nature_Lightning.png", "spell_nature_earthshock.jpg", "healing-stream_totem.webp",
+                    "135990.png", "spell_frost_frostbolt02.png"]
+        bars = wow_bars.last_character(wow_bars.parse_saved_variables(WOW_SAVED)["JarnGripDB"])
+        result = wow_bars.pad_bars(bars, {"slot_1": "ctrl+59"}, pictures, names)
+        assert result["slot_1:up"] == {"name": "Hex", "picture": ""}  # Ctrl+F1 with Shift
+        result = wow_bars.pad_bars(bars, {}, pictures, names)
+        assert result["slot_1"] == {"name": "Lightning Bolt", "picture": "Spell_Nature_Lightning.png"}  # by its icon
+        assert result["slot_1:up"]["picture"] == "spell_nature_earthshock.jpg"  # by its path, in older clients
+        assert result["slot_1:down"]["picture"] == "healing-stream_totem.webp"  # by the spell's name
+        assert result["slot_2"]["picture"] == "135990.png"  # a picture named for the file id comes first
+        assert result["slot_3:up"] == {"name": "Open/Close World Map", "picture": ""}
+        assert "slot_4" not in result and "slot_3" not in result
+        assert wow_bars.pad_bars({}, {}, pictures, names) == {}
+
+
+def test_a_key_without_a_picture_of_its_own_shows_its_wow_icon_or_name():
+    pad, bridge, clock = make()
+    slot1, slot2 = pad_model.NUMBER_SLOTS[:2]
+    pad.wow_bars = {"slot_1": {"name": "Lightning Bolt", "picture": "bolt.png"},
+                    "slot_1:up": {"name": "Earth Shock", "picture": ""}, "slot_2": {"name": "Hex", "picture": ""}}
+    assert pad.icon_of(slot1) == "" and pad.name_of(slot1) == "" and pad.picture_names() == set()  # icons off
+    pad.apply_config({"number_icons": True, "icons": {"slot_2": "mine.png"}})
+    assert (pad.icon_of(slot1), pad.name_of(slot1)) == ("bolt.png", "Lightning Bolt")
+    assert (pad.icon_of(slot1, "up"), pad.name_of(slot1, "up")) == ("", "Earth Shock")
+    assert pad.icon_of(slot2) == "mine.png"  # a picture picked for the key wins
+    assert pad.picture_names() == {"bolt.png", "mine.png"}
+    # Painted at rest and while swiped, with and without pictures, long names included.
+    pad_draw = painter()
+    pad.wow_bars["slot_3:down"] = {"name": "Summon Elemental Lord of the Very Long Spell Names", "picture": ""}
+    pad.icon_surfaces = {"bolt.png": Anything()}
+    for theme in pad_model.THEME_IDS:
+        pad.apply_config({"theme": theme, "number_icons": True})
+        pad_draw.paint(Context(), pad)
+        for widget_id, dy in (("number:slot_1", -90), ("number:slot_1", 90), ("number:slot_3", 90)):
+            tid = down(pad, clock, widget_id)
+            x, y = center(pad, widget_id)
+            pad.touch_move(tid, x, y + dy, clock.now)
+            pad_draw.paint(Context(), pad)
+            pad.touch_up(tid, clock.now)
+            clock.now += 0.5
+    classic = pad_draw.THEMES["classic"]
+    # The stand-in's letters are 10 wide at any size: two words fit in 100, and in 40 not even one more shrinking helps.
+    assert pad_draw._name_lines(Context(), classic, "One Two Three Four Five", 30, 100) == (
+        ["One Two", "Three Four", "Five"], 30)
+    assert pad_draw._name_lines(Context(), classic, "One Two Three Four Five", 30, 40) == (
+        ["One", "Two", "Three Four Five"], 14)
+
+
+def test_the_icon_page_learns_what_the_wow_bars_hold():
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        import main
+        main.HOME = Path(tmp) / "home"
+        bars = call("wow_bars")
+        assert (bars["file"], bars["keys"], bars["icon_list"]) == ("", {}, False)
+        folder = Path(call("list_icons")["folder"])
+        (folder / "JarnGrip.lua").write_text(WOW_SAVED)
+        (folder / "lightning bolt.png").write_bytes(b"")
+        bars = call("wow_bars")
+        assert bars["file"] == str(folder / "JarnGrip.lua") and bars["character"] == "Thrall - Area 52"
+        assert bars["keys"]["slot_1"] == {"name": "Lightning Bolt", "picture": "lightning bolt.png"}
+        assert call("get_config")["wow_bars"] is True
+        assert call("save_config", {"wow_bars": False})["config"]["wow_bars"] is False
+
+
+def test_the_wow_addon_saves_what_the_pad_reads():
+    import wow_bars
+
+    addon = Path(ROOT) / "wow-addon" / "JarnGrip"
+    toc = (addon / "JarnGrip.toc").read_text()
+    assert f"## SavedVariables: {wow_bars.TABLE}" in toc and "\nJarnGrip.lua" in toc
+    interfaces = toc.split("\n", 1)[0].removeprefix("## Interface: ").split(", ")
+    assert {"16001", "120105"} <= set(interfaces)  # WoW Forever (1.60.1) and retail
+    lua = (addon / "JarnGrip.lua").read_text()
+    for field in ("JarnGripDB.last", "JarnGripDB.characters[who]", "keys = keys", "spec = specName()", "saved = time()"):
+        assert field in lua, field
+    # It looks at every key the pad's numbers can send in WoW, with Shift and Ctrl.
+    listed = re.search(r"local KEYS = \{(.*?)\}", lua, re.DOTALL).group(1)
+    for name in ("1", "0", "-", "="):
+        assert f'"{name}"' in listed
+    assert '"SHIFT-"' in lua and '"CTRL-"' in lua and '"CTRL-SHIFT-"' in lua
+    assert "SendChat" not in lua and "RunMacro" not in lua and "CastSpell" not in lua  # it only reads
+
+
+
+def test_japanese_keyboard_bindings_make_the_equals_key_a_caret():
+    import wow_bars
+
+    # The addon mirrors each JIS key's saved binding onto the US key in its place, as session-only overrides, only
+    # when turned on, and saves that it is on for the pad.
+    lua = (Path(ROOT) / "wow-addon" / "JarnGrip" / "JarnGrip.lua").read_text()
+    assert '{ "=", "^" }' in lua and "SetOverrideBinding(owner" in lua and "ClearOverrideBindings(owner)" in lua
+    assert "if JarnGripDB.jis then" in lua and "JarnGripDB.jis = JarnGripDB.jis == true" in lua
+    assert "GetBindingAction(modifier .. pair[2])  --" in lua  # the saved binding, never an override
+    assert "SaveBindings" not in lua and "SetBinding(" not in lua  # the account's bindings are never changed
+    saved = wow_bars.parse_saved_variables(WOW_SAVED)["JarnGripDB"]
+    assert wow_bars.last_character(saved)["jis"] is False
+    assert wow_bars.last_character({**saved, "jis": True})["jis"] is True
+    assert wow_bars.last_character({**saved, "jis": "yes"})["jis"] is False
+    # The pad labels its = key ^ while they are on, and only that key.
+    pad, bridge, clock = make()
+    numbers = [w for w in pad.widgets if w.kind == "number"]
+    equals = next(w for w in numbers if w.data.id == "slot_12")
+    assert [pad.number_label(w) for w in numbers][-2:] == ["-", "="]
+    pad.wow_jis = True
+    assert pad.number_label(equals) == "^" and [pad.number_label(w) for w in numbers][:3] == ["1", "2", "3"]
+    pad_draw = painter()
+    for icons in (False, True):
+        pad.apply_config({"number_icons": icons})
+        drawn = Recorder()
+        pad_draw.paint(drawn, pad)
+        assert "^" in drawn.texts and "=" not in drawn.texts, icons
+    # The icon page labels it too.
+    with open(os.path.join(ROOT, "dist", "index.js"), encoding="utf-8") as f:
+        panel = f.read()
+    assert 'label==="="&&bars.jis' in panel
+
+def driver_app():
+    """jarngrip.py, imported against a stand-in GTK, and a PadApp of it with only what the icon and WoW bars code
+    uses: its methods run without a display."""
+    import importlib
+    import threading
+
+    class GLibError(Exception):
+        message = "unreadable"
+
+    loads = []
+
+    class Pixbuf:
+        @staticmethod
+        def new_from_file_at_scale(path, w, h, keep):
+            loads.append(Path(path).name)
+            if Path(path).read_bytes() == b"broken":
+                raise GLibError()
+            return types.SimpleNamespace(apply_embedded_orientation=lambda: None, get_width=lambda: 64,
+                                         get_height=lambda: 64)
+
+    idle = []
+    repository = types.SimpleNamespace(
+        Gdk=types.SimpleNamespace(cairo_surface_create_from_pixbuf=lambda *a: Anything()),
+        GdkPixbuf=types.SimpleNamespace(Pixbuf=Pixbuf),
+        GLib=types.SimpleNamespace(Error=GLibError, idle_add=lambda fn, *args: idle.append((fn, args))),
+        Gtk=types.SimpleNamespace())
+    sys.modules["gi"] = types.SimpleNamespace(require_version=lambda *a: None, repository=repository)
+    sys.modules["gi.repository"] = repository
+    painter()  # pad_draw against the stand-in cairo
+    jarngrip = importlib.import_module("jarngrip")
+    # Imported once: each call's stand-ins replace the last one's, so that loads and idle are this call's.
+    jarngrip.Gdk, jarngrip.GdkPixbuf, jarngrip.GLib = repository.Gdk, repository.GdkPixbuf, repository.GLib
+    app = jarngrip.PadApp.__new__(jarngrip.PadApp)
+    app.pad, _, _ = make()
+    app.lock, app.stop, app._wow_wake = threading.RLock(), threading.Event(), threading.Event()
+    app._icon_cache, app._config, app._config_mtime, app._wow_inputs = {}, {}, 1, (False, {}, None)
+    app._last_error_log = 0.0
+    app.logger = types.SimpleNamespace(lines=[])
+    app.logger.log = lambda code, text: app.logger.lines.append(text)
+    app.area = types.SimpleNamespace(draws=0)
+    app.area.queue_draw = lambda: setattr(app.area, "draws", app.area.draws + 1)
+    return jarngrip, app, loads, idle
+
+
+def test_the_pad_shows_a_picture_copied_in_or_replaced_without_a_setting_changing():
+    with tempfile.TemporaryDirectory() as tmp:
+        jarngrip, app, loads, idle = driver_app()
+        jarngrip.ICONS = Path(tmp)
+        folder = Path(tmp) / "wow"
+        folder.mkdir()
+        app.pad.apply_config({"number_icons": True, "icons": {"slot_1": "fire.png", "slot_2": "bad.png"}})
+        assert app._update_icons() is False and app.pad.icon_surfaces == {}  # neither is there yet
+        (folder / "fire.png").write_bytes(b"one")
+        (folder / "bad.png").write_bytes(b"broken")
+        assert app._update_icons() is True and set(app.pad.icon_surfaces) == {"fire.png"}
+        assert app._update_icons() is False and loads == ["bad.png", "fire.png"]  # neither loaded again
+        assert len(app.logger.lines) == 1  # the broken one is logged once
+        (folder / "fire.png").write_bytes(b"two")  # the same name, another picture
+        os.utime(folder / "fire.png", ns=(1, 1))
+        assert app._update_icons() is True and loads[-1] == "fire.png"
+
+
+def test_the_pad_looks_up_the_wow_bars_on_their_own_thread():
+    import threading
+
+    with tempfile.TemporaryDirectory() as tmp:
+        jarngrip, app, loads, idle = driver_app()
+        jarngrip.ICONS = Path(tmp) / "Icons"
+        folder = jarngrip.ICONS / "wow"
+        folder.mkdir(parents=True)
+        (folder / "JarnGrip.lua").write_text(WOW_SAVED)
+        (folder / "earth shock.png").write_bytes(b"x")
+        app._config = {"bindings": {}}
+        app.pad.apply_config({"number_icons": True})
+        app._ask_wow_bars()
+        assert app._wow_inputs[0] is True and app._wow_wake.is_set()
+        worker = threading.Thread(target=app._wow_worker, daemon=True)
+        worker.start()
+        for _ in range(200):
+            if idle:
+                break
+            time.sleep(0.01)
+        app.stop.set()
+        app._wow_wake.set()
+        worker.join(1)
+        assert not worker.is_alive() and len(idle) == 1
+        fn, args = idle[0]
+        assert fn(*args) is False  # handed to the GTK thread, once
+        assert app.pad.wow_bars["slot_1:up"] == {"name": "Earth Shock", "picture": "earth shock.png"}
+        assert "earth shock.png" in app.pad.icon_surfaces and app.area.draws == 1
+        app._config = {"wow_bars": False}
+        app._ask_wow_bars()  # turned off: forgotten at once, and redrawn
+        assert app.pad.wow_bars == {} and app.area.draws == 2
+        fn(*args)  # a result that arrives late is not shown
+        assert app.pad.wow_bars == {}
+
+
+def test_a_wow_bars_lookup_that_fails_is_tried_again():
+    import threading
+    import wow_bars
+
+    with tempfile.TemporaryDirectory() as tmp:
+        jarngrip, app, loads, idle = driver_app()
+        jarngrip.ICONS = Path(tmp) / "Icons"
+        folder = jarngrip.ICONS / "wow"
+        folder.mkdir(parents=True)
+        (folder / "JarnGrip.lua").write_text(WOW_SAVED)
+        app._config = {"bindings": {}}
+        app.pad.apply_config({"number_icons": True})
+        real, calls = wow_bars.lookup, []
+
+        def flaky(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("the file was being rewritten")
+            return real(*args)
+
+        app._log_error = lambda *a: None
+        jarngrip.wow_bars.lookup = flaky
+        try:
+            worker = threading.Thread(target=app._wow_worker, daemon=True)
+            worker.start()
+            for _ in range(2):  # the second wake, with nothing changed, tries the same files again
+                app._ask_wow_bars()
+                for _ in range(200):
+                    if len(calls) >= 2 or (len(calls) == 1 and not app._wow_wake.is_set()):
+                        break
+                    time.sleep(0.01)
+                time.sleep(0.05)
+            for _ in range(200):
+                if idle:
+                    break
+                time.sleep(0.01)
+            app.stop.set()
+            app._wow_wake.set()
+            worker.join(1)
+        finally:
+            jarngrip.wow_bars.lookup = real
+        assert len(calls) == 2 and len(idle) == 1
+
+def test_review_fixes_in_the_backend_the_script_and_the_panel():
+    import importlib
+    import wow_bars
+
+    sys.path.insert(0, ROOT)
+    import main
+
+    assert main.PICTURE_TYPES == wow_bars.PICTURE_TYPES
+    # A full-width or Arabic-Indic digit is not one of the pad's numbers, and does not stop the fill.
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        folder = Path(call("list_icons")["folder"])
+        for name in ("５-fireball.png", "٣.png", "5-frost.png"):
+            (folder / name).write_bytes(b"")
+        result = call("fill_icons")
+        assert result["filled"] == 1 and result["config"]["icons"] == {"slot_5": "5-frost.png"}
+    # The script keeps the lines the pad reads.
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    script = importlib.import_module("wow-icon-names")
+    lines = ["132089;interface/icons/ability_ambush.blp\n", "1;interface/cinematics/logo.avi\n",
+             "x;interface/icons/a.blp\n", "5;Interface\\Icons\\B.blp\n"]
+    assert list(script.icons(lines)) == ["132089;interface/icons/ability_ambush.blp\n", "5;Interface\\Icons\\B.blp\n"]
+    assert [wow_bars.icon_line(line) for line in lines] == [(132089, "interface/icons/ability_ambush.blp"), None, None,
+                                                            (5, "Interface\\Icons\\B.blp")]
+    with open(os.path.join(ROOT, "dist", "index.js"), encoding="utf-8") as f:
+        panel = f.read()
+    assert "bars.character?`WoW bars:" in panel  # a file with no character in it is not "saved 20399 days ago"
+    with open(os.path.join(ROOT, "wow-addon", "JarnGrip", "JarnGrip.lua"), encoding="utf-8") as f:
+        lua = f.read()
+    assert 'if waitingForItems and JarnGripDB then queue() end' in lua
+
+
+
+class Recorder(Context):
+    """A stand-in cairo context that remembers the color each piece of text was drawn in, and the icons masked."""
+
+    def __init__(self):
+        self.rgba, self.texts, self.masks, self.faint = None, {}, 0, 0
+
+    def set_source_rgba(self, *rgba):
+        self.rgba = rgba
+
+    def set_source_rgb(self, *rgb):
+        self.rgba = (*rgb, 1.0)
+
+    def show_text(self, text):
+        self.texts[text] = self.rgba  # the last layer drawn: the lettering over its shadow
+
+    def mask_surface(self, *args):
+        self.masks += 1
+
+    def paint_with_alpha(self, alpha):
+        self.faint += 1
+
+
+def test_the_wow_chat_petals_are_lettered_in_the_games_channel_colors():
+    pad_draw = painter()
+    radial = next(s for s in pad_model.WOW.buttons if s.radial)
+    colors = {slot.label: slot.color for _, slot in radial.radial}
+    assert colors == {"Guild": 0x40FF40, "Party": 0xAAAAFF, "Yell": 0xFF4040, "Raid": 0xFF7F00, "Instance": 0xFF7F00,
+                      "Say": 0xFFFFFF, "Whisper": 0xFF80FF}
+    assert radial.picture == "chat_say"
+    ffxi = next(s for s in pad_model.FFXI.buttons if s.radial)
+    assert not ffxi.picture and not any(slot.color for _, slot in ffxi.radial)  # FFXI's stay as they were
+    for theme_id, theme in pad_draw.THEMES.items():
+        pad, bridge, clock = make()
+        pad.apply_config({"theme": theme_id})
+        tap(pad, clock, "tab:2")
+        landing = center(pad, "page:chat")
+        tid = down(pad, clock, "page:chat")
+        clock.now += pad_model.RADIAL_OPEN_S + 0.01
+        pad.touch_move(tid, *slice_point(*landing, "right"), clock.now)  # Yell chosen
+        cr = Recorder()
+        pad_draw.paint(cr, pad)
+        rgb = lambda name: tuple(round(c, 3) for c in cr.texts[name][:3])
+        assert rgb("Guild") == (round(0x40 / 255, 3), 1.0, round(0x40 / 255, 3)), theme_id
+        assert rgb("Whisper") == (1.0, round(0x80 / 255, 3), 1.0), theme_id
+        assert rgb("Yell") == tuple(round(c, 3) for c in theme.text_pressed), theme_id  # chosen: as a pressed button
+        pad.touch_up(tid, clock.now)
+
+
+def test_the_chat_button_shows_its_icon_where_it_is_and_its_name_where_it_is_not():
+    pad_draw = painter()
+    pad, bridge, clock = make()
+    tap(pad, clock, "tab:2")
+    try:
+        pad_draw.BUTTON_ICONS = {}
+        cr = Recorder()
+        pad_draw.paint(cr, pad)
+        assert "Chat" in cr.texts and cr.masks == 0
+        pad_draw.BUTTON_ICONS = {"chat_say": Anything()}
+        cr = Recorder()
+        pad_draw.paint(cr, pad)
+        assert "Chat" not in cr.texts and cr.masks == 1
+        tid = down(pad, clock, "page:chat")  # open: in the hub too
+        clock.now += pad_model.RADIAL_OPEN_S + 0.01
+        cr = Recorder()
+        pad_draw.paint(cr, pad)
+        assert "Chat" not in cr.texts and cr.masks == 2 and "Say" in cr.texts
+        pad.touch_up(tid, clock.now)
+    finally:
+        pad_draw.BUTTON_ICONS = {}
+
+
+def test_the_bundled_button_icons_are_installed_and_loaded():
+    with tempfile.TemporaryDirectory() as tmp:
+        jarngrip, app, loads, idle = driver_app()
+        folder = Path(tmp) / "icons"
+        assert app._load_button_icons(folder) == {}  # none bundled: every button keeps its label
+        folder.mkdir()
+        for name, data in (("chat_say.png", b"x"), ("broken.png", b"broken"), ("notes.txt", b"x")):
+            (folder / name).write_bytes(data)
+        assert set(app._load_button_icons(folder)) == {"chat_say"} and len(app.logger.lines) == 1
+        # The backend copies them next to the driver, and takes away those no longer bundled.
+        sys.path.insert(0, ROOT)
+        import main
+        saved = (main.PLUGIN, main.APP, main.UNIT_FILE, main.LISTENER_FILE, main._systemctl, main._install_desktop_entries)
+        main.UID, main.GID = os.getuid(), os.getgid()  # the files are made by whoever runs the tests
+        try:
+            plugin, app_dir = Path(tmp) / "plugin", Path(tmp) / "app"
+            for sub in ("driver/bin", "driver/fonts", "driver/icons", "systemd"):
+                (plugin / sub).mkdir(parents=True)
+            (plugin / "driver/icons/chat_say.png").write_bytes(b"x")
+            for unit in ("jarngrip.service", "jarngrip-ayn.service"):
+                (plugin / "systemd" / unit).write_text("")
+            main.PLUGIN, main.APP = plugin, app_dir
+            main.UNIT_FILE = Path(tmp) / "units" / "jarngrip.service"
+            main.LISTENER_FILE = main.UNIT_FILE.parent / "jarngrip-ayn.service"
+            main._systemctl = lambda *a: True
+            main._install_desktop_entries = lambda on: None
+            (app_dir / "icons").mkdir(parents=True)
+            (app_dir / "icons" / "old.png").write_bytes(b"x")
+            assert main._install_runtime() is True
+            assert sorted(p.name for p in (app_dir / "icons").iterdir()) == ["chat_say.png"]
+            assert main._install_runtime() is False  # nothing changed the second time
+        finally:
+            (main.PLUGIN, main.APP, main.UNIT_FILE, main.LISTENER_FILE, main._systemctl,
+             main._install_desktop_entries) = saved
+
+
+
+def test_every_wow_button_has_its_icon_and_every_icon_a_button():
+    folder = Path(ROOT) / "driver" / "icons"
+    shipped = {p.stem for p in folder.glob("*.png")}
+    wanted = {s.picture for s in pad_model.WOW.buttons} - {""}
+    assert wanted == shipped
+    labels = {s.label: (s.picture, s.tag) for s in pad_model.WOW.buttons}
+    assert labels["Map"] == ("map", "") and labels["Sit / stand"] == ("sit_stand", "")
+    assert labels["Party 3"] == ("party", "3") and labels["Chat"] == ("chat_say", "")
+    radial = next(s for s in pad_model.WOW.buttons if s.radial)
+    assert not any(slot.picture for _, slot in radial.radial)  # the chat petals keep their words
+    for game in (pad_model.FFXI, pad_model.DESKTOP):
+        assert not any(s.picture for s in game.buttons), game.id
+
+
+def test_wow_buttons_show_their_icons_in_place_of_their_labels():
+    pad_draw = painter()
+    names = {s.picture for s in pad_model.WOW.buttons} - {""}
+    try:
+        for page, title in enumerate(pad_model.WOW.titles):
+            pad, bridge, clock = make()
+            tap(pad, clock, f"tab:{page}")
+            buttons = [w for w in pad.widgets if w.kind == "page"]
+            pad_draw.BUTTON_ICONS = {name: Anything() for name in names}
+            cr = Recorder()
+            pad_draw.paint(cr, pad)
+            assert cr.masks == len(buttons), title  # one icon a button, Chat's included
+            for w in buttons:
+                assert w.label not in cr.texts, (title, w.label)
+            if title == "Target":
+                assert {"1", "2", "3", "4"} <= set(cr.texts)  # the party members' numbers, beside their icon
+            pad_draw.BUTTON_ICONS = {}  # missing: the labels come back
+            cr = Recorder()
+            pad_draw.paint(cr, pad)
+            assert cr.masks == 0 and all(w.label in cr.texts or w.wrap for w in buttons), title
+        pad, bridge, clock = make()
+        pad.apply_config({"game": "ffxi"})
+        pad_draw.BUTTON_ICONS = {name: Anything() for name in names}
+        cr = Recorder()
+        pad_draw.paint(cr, pad)
+        assert cr.masks == 0 and "Confirm" in cr.texts  # FFXI keeps its words
+    finally:
+        pad_draw.BUTTON_ICONS = {}
+
+
+
+def test_a_swipe_lights_its_square_and_a_modifier_sent_fades_for_two_seconds():
+    pad_draw = painter()
+    for theme in pad_model.THEME_IDS:
+        pad, bridge, clock = make()
+        pad.apply_config({"theme": theme, "number_icons": True})
+        x, y = center(pad, "number:slot_5")
+        for dx, dy, echo in ((0, -90, True), (-90, 0, True), (0, 90, False)):  # Shift, Ctrl, cancel
+            tid = down(pad, clock, "number:slot_5")
+            pad.touch_move(tid, x + dx, y + dy, clock.now)
+            cr = Recorder()
+            pad_draw.paint(cr, pad)
+            assert cr.faint == 2, (theme, dx, dy)  # all three squares, the two not swiped toward faint
+            pad.touch_up(tid, clock.now)
+            clock.now += 0.5
+            cr = Recorder()
+            pad_draw.paint(cr, pad)
+            assert cr.faint == (1 if echo else 0) and pad.fading() == echo, (theme, dx, dy)  # sent: fading
+            clock.now += pad_model.SWIPE_FADE_S
+            cr = Recorder()
+            pad_draw.paint(cr, pad)
+            assert cr.faint == 0 and not pad.fading(), (theme, dx, dy)  # gone after two seconds
+        pad.apply_config({"number_icons": False})  # without icons: the fan, no squares, nothing fading
+        tid = down(pad, clock, "number:slot_5")
+        pad.touch_move(tid, x, y - 90, clock.now)
+        cr = Recorder()
+        pad_draw.paint(cr, pad)
+        assert cr.faint == 0
+        pad.touch_up(tid, clock.now)
+        assert not pad.fading()
+
+
+
+def test_swipe_words_and_fans_follow_the_new_directions():
+    import math
+
+    pad_draw = painter()
+    # The fans open the way the finger goes: the second modifier's left, cancel's down, a target's confirm right.
+    assert pad_draw.FAN_DIRECTIONS == {"up": -math.pi / 2, "down": math.pi, "cancel": math.pi / 2, "confirm": 0.0}
+    with tempfile.TemporaryDirectory() as tmp:
+        call = backend(tmp)
+        folder = Path(call("list_icons")["folder"])
+        for name in ("5-left-frost.png", "6-down-fire.png", "7-ctrl-nova.png"):
+            (folder / name).write_bytes(b"")
+        icons = call("fill_icons")["config"]["icons"]
+        # "left" names the second modifier's swipe; "down" still does, as pictures were named before.
+        assert icons == {"slot_5:down": "5-left-frost.png", "slot_6:down": "6-down-fire.png",
+                         "slot_7:down": "7-ctrl-nova.png"}
 
 
 if __name__ == "__main__":

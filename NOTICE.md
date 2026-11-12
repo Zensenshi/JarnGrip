@@ -39,6 +39,14 @@ Written for this project and not ported: the Charcoal, Dark and Game Glass theme
 
 Both were taken from the variable fonts in [google/fonts](https://github.com/google/fonts) and reduced to their Bold instance (fontTools' instancer), the only weight the pad uses. Neither font declares a Reserved Font Name. The fonts are not covered by JarnGrip's GPL: they stay under the OFL.
 
+## Button icons
+
+The icons in `driver/icons` (Map, Bags, System and WoW's other page buttons) were made for JarnGrip: drawn by an image generator from the project's own design brief (`docs/icon-brief.md`), which asked for original line icons and ruled out copying or imitating Blizzard's or any other game's interface art, then cut out one by one. They are part of JarnGrip and covered by its GPL-3.0 license.
+
+JarnGrip ships no pictures for the number pad. The ones you add, including any game icons, stay under their own owners' terms.
+
+`scripts/wow-icon-names.py` uses the community listfile from [wowdev/wow-listfile](https://github.com/wowdev/wow-listfile) by the wowdev community. The script downloads it when you run it; neither the listfile nor the `icon-names.csv` made from it is included in JarnGrip.
+
 ## Platform
 
 - [Armada OS](https://armadaos.dev) by the Armada Linux team provides `armada-run-bottom` and the bottom-screen gamescope session and services the pad runs in.
@@ -47,4 +55,4 @@ Both were taken from the variable fonts in [google/fonts](https://github.com/goo
 
 ## Trademarks
 
-The project includes no World of Warcraft or Blizzard assets, game files, fonts, logos or executables, and no Valve assets. World of Warcraft is a trademark of Blizzard Entertainment; Steam and SteamOS are trademarks of Valve Corporation; AYN Thor is a product of AYN. These names are used only to describe compatibility. This is an unofficial community project, not affiliated with or endorsed by any of them.
+The project includes no World of Warcraft or Blizzard assets (the guide links to a third-party pack of WoW icons, which JarnGrip does not include), game files, fonts, logos or executables, and no Valve assets. World of Warcraft is a trademark of Blizzard Entertainment; Steam and SteamOS are trademarks of Valve Corporation; AYN Thor is a product of AYN. These names are used only to describe compatibility. This is an unofficial community project, not affiliated with or endorsed by any of them.

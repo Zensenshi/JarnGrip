@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 *.tmp
+# Made by scripts/wow-icon-names.py, for the Thor's icon folder, not for the repository.
+icon-names.csv

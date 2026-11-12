@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import fcntl
 import json
+import math
 import os
 import select
 import signal
@@ -36,6 +37,7 @@ import haptics  # noqa: E402
 import pad_draw  # noqa: E402
 import system_status  # noqa: E402
 import touch_device  # noqa: E402
+import wow_bars  # noqa: E402
 from burn_in import BurnInProtector  # noqa: E402
 from debug_codes import DebugCode, DebugLogger  # noqa: E402
 from engine import SCREEN_HEIGHT, SCREEN_WIDTH, TouchGestureProcessor, UInputBridge  # noqa: E402
@@ -47,11 +49,17 @@ CONFIG = Path.home() / ".config/jarngrip/config.json"
 MARKER = Path.home() / ".local/state/jarngrip/restore.json"
 # Pictures for the Game Glass theme; the Decky panel lists this folder.
 BACKGROUNDS = Path.home() / "Pictures/JarnGrip"
+# The number pad's icons, a folder per game (Icons/wow, Icons/ffxi); the Decky panel lists them too.
+ICONS = BACKGROUNDS / "Icons"
+# How often the pad looks again for the WoW addon's file (wow_bars.find_file), which a first /reload can make: it looks
+# in a few folders. The file it found is checked every second. Both on the WoW bars' own thread (_wow_worker).
+WOW_SEARCH_S = 30.0
 # Held for the pad's lifetime, so that the Game Mode service and a Desktop Mode launch never run two pads at once.
 LOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "jarngrip.lock"
 RESTORE_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada-bottom-screen.service"))
 TOUCH_RETRY_S = 3
 RADIAL_FRAME_MS = 16  # repaints while a radial blooms
+FADE_FRAME_MS = 50    # repaints while a swipe's square fades: slow, but smooth enough for a fade
 
 
 def load_config() -> dict:
@@ -124,6 +132,7 @@ class PadApp:
         self.logger = DebugLogger("jarngrip")
         self.logger.log(DebugCode.DAEMON_STARTING, "Desktop Mode" if desktop else "Game Mode")
         pad_draw.LOADED_FONTS = load_fonts(Path(__file__).resolve().parent.parent / "fonts")
+        pad_draw.BUTTON_ICONS = self._load_button_icons(Path(__file__).resolve().parent.parent / "icons")
         if pad_draw.LOADED_FONTS != {"Cinzel", "Nunito"}:
             self.logger.log(DebugCode.ERR_CAIRO_RENDER, f"bundled fonts loaded: {sorted(pad_draw.LOADED_FONTS)}")
         self.exit_code = 0
@@ -151,6 +160,14 @@ class PadApp:
         self._last_view = ""
         self.clock_24h = False
         self._backdrop_key: tuple | None = None  # (picture, blur) the backdrop was made from
+        self._fade_pending = False  # a fade's next frame is already asked for: each draw must not start another
+        self._icon_cache: dict = {}  # (game, file name) -> (modification time, icon) of the icons loaded
+        self._config: dict = {}
+        # The WoW action bars are looked up on a thread of their own (_wow_worker), woken once a second: finding the
+        # addon's file and reading a big icon list must not hold up drawing. It reads (wanted, bindings, config
+        # modification time) from _wow_inputs, under self.lock.
+        self._wow_inputs: tuple = (False, {}, None)
+        self._wow_wake = threading.Event()
         self._logged_size: tuple = ()
         self.pad = PadController(self.bridge, self.gesture, on_change=self._changed,
                                  on_close=lambda: GLib.idle_add(self._close_pad), haptic=self.haptics.pulse,
@@ -204,6 +221,7 @@ class PadApp:
         self.window.fullscreen_on_monitor(self.window.get_screen(), index)
 
     def start(self) -> None:
+        threading.Thread(target=self._wow_worker, name="wow-bars", daemon=True).start()
         self._tick()
         GLib.timeout_add_seconds(1, self._tick)
         GLib.timeout_add(250, self._burn_in_tick)
@@ -214,14 +232,41 @@ class PadApp:
 
     # ------------------------------------------------------------------ drawing
 
-    def _changed(self) -> None:
-        """Called by the pad (on either thread) when something visible changed."""
+    def _changed(self, widget=None) -> None:
+        """Called by the pad (on either thread) when something visible changed: only widget's swipe, if it says."""
+        if widget is not None:
+            GLib.idle_add(self._redraw_swipes, [widget])
+            return
         GLib.idle_add(self._redraw)
         GLib.timeout_add(int(FLASH_S * 1000) + 20, self._redraw)  # and once more when a tapped button stops being lit
 
     def _redraw(self) -> bool:
         self.area.queue_draw()
         return False
+
+    def _redraw_swipes(self, widgets) -> bool:
+        """Repaint what the swipes on widgets can change (pad_draw.swipe_areas), and nothing else."""
+        width, height = self.area.get_allocated_width(), self.area.get_allocated_height()
+        if width <= 0 or height <= 0:
+            return self._redraw()
+        # Pad pixels to the window's: the painter scales the pad to the window, under the burn-in drift.
+        sx, sy = width / SCREEN_WIDTH, height / SCREEN_HEIGHT
+        dx, dy = self.pad.shift
+        for widget in widgets:
+            for x, y, w, h in pad_draw.swipe_areas(self.pad, widget):
+                x0, y0 = math.floor((x + dx - 1) * sx), math.floor((y + dy - 1) * sy)
+                x1, y1 = math.ceil((x + w + dx + 1) * sx), math.ceil((y + h + dy + 1) * sy)
+                self.area.queue_draw_area(x0, y0, x1 - x0, y1 - y0)
+        return False
+
+    def _swipe_frame(self) -> bool:
+        return self._redraw_swipes(self.pad.swiping())
+
+    def _fade_frame(self) -> bool:
+        self._fade_pending = False
+        # The keys whose square fades, the one that has just gone included, so that its last trace is painted out.
+        echoes = dict(self.pad.swipe_echoes)
+        return self._redraw_swipes([w for w in self.pad.widgets if w.id in echoes])
 
     def on_draw(self, area, cr) -> bool:
         width, height = area.get_allocated_width(), area.get_allocated_height()
@@ -235,6 +280,11 @@ class PadApp:
             pad_draw.paint(cr, self.pad)
             if self.pad.blooming():
                 GLib.timeout_add(RADIAL_FRAME_MS, self._redraw)  # a radial is still blooming
+            elif self.pad.swiping():
+                GLib.timeout_add(RADIAL_FRAME_MS, self._swipe_frame)  # a finger swipes: its areas, every frame
+            if self.pad.fading() and not self._fade_pending:
+                self._fade_pending = True  # one frame at a time, however many other draws come meanwhile
+                GLib.timeout_add(FADE_FRAME_MS, self._fade_frame)  # a swipe's square is still fading
         except Exception as err:
             self._log_error(DebugCode.ERR_CAIRO_RENDER, f"{type(err).__name__}: {err}")
         return False
@@ -253,9 +303,10 @@ class PadApp:
             mtime = CONFIG.stat().st_mtime_ns
         except OSError:
             mtime = None
-        if mtime != self._config_mtime:
+        changed = mtime != self._config_mtime
+        if changed:
             self._config_mtime = mtime
-            cfg = load_config()
+            cfg = self._config = load_config()
             with self.lock:
                 self.pad.apply_config(cfg)
             self.haptic_settings = (bool(cfg.get("haptics", True)), _number(cfg, "haptics_strength", 1.0),
@@ -266,6 +317,11 @@ class PadApp:
             self.clock_24h = bool(cfg.get("clock_24h", False))
             self._update_backdrop(cfg)
             self.area.queue_draw()  # the theme may have changed
+        self._ask_wow_bars()
+        # Every second, not only when the config changes: a picture copied into the icon folder, or one replaced by
+        # another of the same name, shows without a setting having to change.
+        if self._update_icons():
+            self.area.queue_draw()
         status = self.haptics.status
         self.haptics.configure(*self.haptic_settings)  # not under self.lock: it can wait on InputPlumber
         if self.haptics.status != status:
@@ -301,6 +357,120 @@ class PadApp:
             except GLib.Error as err:
                 self.logger.log(DebugCode.ERR_CAIRO_RENDER, f"could not load the background {name}: {err.message}")
         self.pad.backdrop = backdrop or pad_draw.default_backdrop(halvings)
+
+    def _wow_wanted(self) -> bool:
+        pad = self.pad
+        return pad.game.id == "wow" and pad.number_icons and self._config.get("wow_bars", True) is not False
+
+    def _ask_wow_bars(self) -> None:
+        """Wake the WoW bars' thread with what it needs, or, where they are not wanted, forget them."""
+        wanted = self._wow_wanted()
+        with self.lock:
+            self._wow_inputs = (wanted, dict(self._config.get("bindings") or {}), self._config_mtime)
+            forget = not wanted and (bool(self.pad.wow_bars) or self.pad.wow_jis)
+            if forget:
+                self.pad.wow_bars, self.pad.wow_jis = {}, False
+        if wanted:
+            self._wow_wake.set()
+        elif forget:
+            self.area.queue_draw()  # the keys' names go too
+
+    def _wow_worker(self) -> None:
+        """On its own thread, for the pad's lifetime: what the player's WoW action bars hold (wow_bars.lookup), from
+        the JarnGrip addon's file, whenever that file, the icon folder, the icon list or the config changed. The
+        result is handed to the GTK thread (_take_wow_bars)."""
+        folder = ICONS / "wow"
+        names_file = folder / wow_bars.ICON_NAMES
+        found, search_at, last_key, names = None, 0.0, None, (None, {})
+        while not self.stop.is_set():
+            self._wow_wake.wait()
+            self._wow_wake.clear()
+            try:
+                with self.lock:
+                    wanted, bindings, config_mtime = self._wow_inputs
+                if self.stop.is_set():
+                    return
+                if not wanted:
+                    last_key = None  # worked out afresh when wanted again
+                    continue
+                now = time.monotonic()
+                if now >= search_at:
+                    found = wow_bars.find_file(Path.home(), folder)
+                    search_at = now + WOW_SEARCH_S
+                key = (found, wow_bars.mtime(found), wow_bars.mtime(folder), wow_bars.mtime(names_file), config_mtime)
+                if key == last_key:
+                    continue
+                if names[0] != key[3]:  # the whole community listfile is big: read it only when it changes
+                    names = (key[3], wow_bars.read_icon_names(names_file))
+                bars, keys = wow_bars.lookup(found, folder, bindings, names[1])
+                GLib.idle_add(self._take_wow_bars, keys, bars.get("character", ""), found, bars.get("jis", False))
+                last_key = key  # only once it worked: a lookup that failed is tried again at the next wake
+            except Exception as err:  # noqa: BLE001 - the thread must outlive one bad file
+                self._log_error(DebugCode.ERR_CAIRO_RENDER, f"WoW bars: {type(err).__name__}: {err}")
+
+    def _take_wow_bars(self, keys: dict, character: str, found: Path | None, jis: bool = False) -> bool:
+        """On the GTK thread: show what _wow_worker found, unless the bars stopped being wanted meanwhile. jis: the
+        addon's Japanese keyboard bindings are on (PadController.wow_jis)."""
+        pad = self.pad
+        if self._wow_wanted() and (keys != pad.wow_bars or jis != pad.wow_jis):
+            if character:
+                self.logger.log(DebugCode.SETTINGS_UPDATED, f"WoW bars of {character}: {len(keys)} keys, from {found}"
+                                + (", Japanese keyboard bindings" if jis else ""))
+            with self.lock:
+                pad.wow_bars, pad.wow_jis = keys, jis
+            self._update_icons()
+            self.area.queue_draw()
+        return False
+
+    def _load_button_icons(self, folder: Path) -> dict:
+        """The bundled button icons (driver/icons/*.png), by name, as pad_draw.BUTTON_ICONS wants them. One that cannot
+        be read is left out, and its button shows its label."""
+        icons = {}
+        for path in sorted(folder.glob("*.png")) if folder.is_dir() else []:
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), pad_draw.ICON_PX, pad_draw.ICON_PX, True)
+                icons[path.stem] = pad_draw.make_icon(Gdk.cairo_surface_create_from_pixbuf(pixbuf, 1, None),
+                                                      pixbuf.get_width(), pixbuf.get_height())
+            except GLib.Error as err:
+                self.logger.log(DebugCode.ERR_CAIRO_RENDER, f"could not load the button icon {path.name}: {err.message}")
+        return icons
+
+    def _update_icons(self) -> bool:
+        """Load the number pad icons the pad shows (picked, or of the WoW bars) from the game's own folder, unless they
+        are loaded already and unchanged. A key whose icon is missing or cannot be read shows its number; a picture
+        that could not be read is not tried again until it changes. Returns whether any icon changed."""
+        pad = self.pad
+        game = pad.game.id
+        names = {name for name in pad.picture_names() if Path(name).name == name}
+        cache, surfaces = {}, {}
+        for name in sorted(names):
+            path = ICONS / game / name
+            try:
+                mtime = path.stat().st_mtime_ns
+            except OSError:
+                continue
+            cached = self._icon_cache.get((game, name))
+            if cached and cached[0] == mtime:
+                icon = cached[1]
+            else:
+                try:
+                    # Loaded at no more than twice its size: a big picture would otherwise take a lot of memory.
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), 2 * pad_draw.ICON_PX,
+                                                                     2 * pad_draw.ICON_PX, True)
+                    pixbuf = pixbuf.apply_embedded_orientation() or pixbuf
+                    icon = pad_draw.make_icon(Gdk.cairo_surface_create_from_pixbuf(pixbuf, 1, None),
+                                              pixbuf.get_width(), pixbuf.get_height())
+                except GLib.Error as err:
+                    self.logger.log(DebugCode.ERR_CAIRO_RENDER, f"could not load the icon {name}: {err.message}")
+                    icon = None
+            cache[(game, name)] = (mtime, icon)
+            if icon is not None:
+                surfaces[name] = icon
+        self._icon_cache = cache
+        changed = surfaces.keys() != pad.icon_surfaces.keys() or any(
+            icon is not pad.icon_surfaces[name] for name, icon in surfaces.items())
+        pad.icon_surfaces = surfaces
+        return changed
 
     def _burn_in_tick(self) -> bool:
         """Four times a second: move the drift along and fade the dimming and hints, redrawing only when that shows."""
@@ -481,6 +651,7 @@ class PadApp:
             return
         self._cleaned = True
         self.stop.set()
+        self._wow_wake.set()  # lets the WoW bars' thread see the stop
         if self.reader is not None:
             self.reader.join(timeout=0.5)
 

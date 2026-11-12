@@ -13,7 +13,7 @@ trap 'rm -f "$ARCHIVE"' EXIT
 MAC_ONLY=()
 if tar --version 2>/dev/null | grep -q bsdtar; then MAC_ONLY=(--no-xattrs --no-mac-metadata); fi
 COPYFILE_DISABLE=1 tar ${MAC_ONLY[@]+"${MAC_ONLY[@]}"} -C "$ROOT" --exclude .git --exclude __pycache__ \
-  --exclude .DS_Store -czf "$ARCHIVE" .
+  --exclude .DS_Store --exclude icon-names.csv -czf "$ARCHIVE" .
 # The installer runs as root, so it is unpacked into a fresh private folder (mktemp -d), never a fixed path in /tmp that
 # another program could have created first and filled with a script of its own.
 REMOTE="$(ssh "$HOST" 'dir="$(mktemp -d /tmp/jarngrip.XXXXXX)" && cat > "$dir/jarngrip.tar.gz" && echo "$dir"' < "$ARCHIVE")"

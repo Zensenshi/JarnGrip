@@ -2,7 +2,7 @@
 """Paints the pad with cairo, in one of a few themes.
 
 The Classic theme (dark stone buttons, gold trim and cream serif lettering) follows the second-screen pad of
-AYN-Thor-WoW-Launcher; Charcoal and Dark are flat; Game Glass shows a picture through frosted glass buttons. Everything is drawn in code (no artwork), and nothing here needs
+AYN-Thor-WoW-Launcher; Charcoal and Dark are flat; Game Glass shows a picture through frosted glass buttons. Everything is drawn in code (no artwork; the only pictures are the player's own: the Game Glass backdrop and the number pad's icons), and nothing here needs
 GTK: paint() takes any cairo context that is 1240 by 1080 units.
 """
 from __future__ import annotations
@@ -13,7 +13,8 @@ from dataclasses import dataclass, fields
 import cairo
 
 from pad_model import (BODY_Y, KEY_TEXT, KEY_WORD_TEXT, MARGIN, PANEL_PAD, RADIAL_CANCEL, RADIAL_DIRECTIONS, RADIAL_GROW,
-                       RADIAL_HUB, THEME_IDS, THEME_Y, H, W, PadController, Widget, radial_reach)
+                       RADIAL_HUB, SWIPE_SIDES, THEME_IDS, THEME_Y, H, W, PadController, Widget, radial_reach,
+                       swipe_square)
 
 
 def _rgb(value: int) -> tuple:
@@ -90,12 +91,23 @@ LOW = 0xE5484D  # a warning red: low battery, a cancelled swipe
 GLASS_TINT = {"rest": 0.30, "muted": 0.36, "raised": 0.22}  # how much a glass button darkens what is behind it
 GLASS_LIT = 0.45      # a pressed glass button frosts over white, translucent, with dark lettering
 BACKDROP_DIM = 0.15   # the picture itself is dimmed a little, so that a busy one does not fight the buttons
+ICON_PX = 192         # a number pad icon is kept this many pixels square: about the size it is drawn at
+ICON_LIT = 0.35       # how strongly a pressed icon key is tinted with the theme's pressed color
+ICON_TAG_TEXT = 26.0  # the number on an icon key, and the modifier on a swipe's square
+NAME_TEXT = 30.0      # in icon mode, the name of what a key without a picture holds on the WoW action bars
+NAME_LINES = 3
 
 # The backdrop of the current paint: (sharp, blurred) screen-sized surfaces, and the burn-in shift it is drawn under.
 _backdrop: tuple | None = None
 _shift = (0.0, 0.0)
 _tab_size = 0.0  # the page tabs' shared lettering size in the current paint
 LOADED_FONTS: set = set()  # the bundled font families the app managed to load; set at start-up
+# The bundled button icons (driver/icons), by name: ICON_PX squares (make_icon) whose shape alone is used, filled with
+# the theme's lettering color. Set at start-up; a button whose icon is missing shows its label.
+BUTTON_ICONS: dict = {}
+BUTTON_ICON_SHARE = 0.5  # how much of a round button's width its icon takes
+PAGE_ICON_SHARE = 0.62   # how much of a page button's height its icon takes
+PAGE_TAG_TEXT = 40.0     # the number beside a shared icon (Party 1 to 4)
 
 
 def _font(t: Theme) -> str:
@@ -152,6 +164,52 @@ def default_backdrop(halvings: int = 3) -> tuple:
         cr.set_source(glow)
         cr.paint()
     return src, _blur(src, W, H, halvings)
+
+
+def make_icon(src, src_w: int, src_h: int):
+    """A number pad icon from a picture of any size: ICON_PX square, scaled to cover it and centered, so that a picture
+    that is not square loses its edges rather than leaving bands."""
+    icon = cairo.ImageSurface(cairo.FORMAT_ARGB32, ICON_PX, ICON_PX)
+    cr = cairo.Context(icon)
+    scale = max(ICON_PX / src_w, ICON_PX / src_h)
+    cr.translate((ICON_PX - src_w * scale) / 2, (ICON_PX - src_h * scale) / 2)
+    cr.scale(scale, scale)
+    cr.set_source_surface(src, 0, 0)
+    cr.paint()
+    return icon
+
+
+def _button_icon(cr, name: str, cx: float, cy: float, size: float, color: tuple, alpha: float = 1.0) -> bool:
+    """A bundled button icon (BUTTON_ICONS) size wide, centered at (cx, cy), in color. False where it is missing, for
+    the label to be drawn instead."""
+    icon = BUTTON_ICONS.get(name)
+    if icon is None:
+        return False
+    cr.save()
+    cr.translate(cx - size / 2, cy - size / 2)
+    cr.scale(size / ICON_PX, size / ICON_PX)
+    cr.set_source_rgba(*color, alpha)
+    cr.mask_surface(icon, 0, 0)
+    cr.restore()
+    return True
+
+
+def _page_icon(cr, t: Theme, w: Widget, color: tuple) -> bool:
+    """A page button's icon (its Slot's picture) in place of its label, with its tag beside it where it has one. False
+    where it has no icon, or its file is missing, for the label to be drawn instead."""
+    slot = w.data
+    if not getattr(slot, "picture", "") or slot.picture not in BUTTON_ICONS:
+        return False
+    size = min(w.h * PAGE_ICON_SHARE, w.w * 0.5)
+    cx, cy = w.x + w.w / 2, w.y + w.h / 2
+    if not slot.tag:
+        return _button_icon(cr, slot.picture, cx, cy, size, color)
+    text_size = _fit(cr, t, [slot.tag], PAGE_TAG_TEXT, w.w / 3)
+    gap = size * 0.15
+    total = size + gap + cr.text_extents(slot.tag).width
+    _button_icon(cr, slot.picture, cx - total / 2 + size / 2, cy, size, color)
+    _text(cr, t, cx + total / 2 - cr.text_extents(slot.tag).width / 2, cy, [slot.tag], text_size, color, w.w / 3)
+    return True
 
 
 def _round_rect(cr, x: float, y: float, w: float, h: float, r: float) -> None:
@@ -390,6 +448,11 @@ def _icon(cr, name: str, cx: float, cy: float, s: float, color: tuple, alpha: fl
             cr.move_to(x, cy - s * 0.6)
             cr.line_to(x, cy + s * 0.6)
         cr.stroke()
+    elif name == "cancel":  # a cross
+        for side in (-1, 1):
+            cr.move_to(cx - s * 0.7, cy - side * s * 0.7)
+            cr.line_to(cx + s * 0.7, cy + side * s * 0.7)
+        cr.stroke()
     elif name in ("previous", "next"):
         side = 1 if name == "next" else -1  # previous is next, mirrored
         _triangle(cr, cx - side * s * 0.8, cy, side * s * 1.2, s * 1.4)
@@ -466,7 +529,9 @@ FAN_REACH = 230.0               # how far the fan reaches past the finger
 FAN_ROUND = 30.0                # the radius of its rounded outer corners
 FAN_TIP = 22.0                  # the radius of its round tip, under the finger
 FAN_LABEL_PAD = 40.0            # room between the lettering and the fan's sides
-FAN_DIRECTIONS = {"up": -math.pi / 2, "down": math.pi / 2, "cancel": math.pi, "confirm": 0.0}  # confirm: a target
+SIDE_ANGLES = {"up": -math.pi / 2, "down": math.pi / 2, "left": math.pi, "right": 0.0}
+# The way each swipe's fan opens: a number's as it was swiped (SWIPE_SIDES), a target's confirm to the right.
+FAN_DIRECTIONS = {swipe: SIDE_ANGLES[side] for swipe, side in {**SWIPE_SIDES, "confirm": "right"}.items()}
 FAN_MIN_TEXT = 22.0             # the smallest lettering a fan shrinks to where the screen ends
 FAN_SIDE_EXTRA = 60.0           # a sideways fan's extra length, for lettering that runs along it
 FAN_CLEAR = 100.0               # a fan's lettering starts at least this far out: the swiping finger is closer in
@@ -530,6 +595,67 @@ def _shape(cr, t: Theme, path, inset_path, fill, cancel: bool) -> None:
         cr.stroke()
 
 
+def _fan_outer(w: Widget, angle: float) -> float:
+    """How far a fan from the middle of w reaches: FAN_REACH past the finger (a sideways one further, for lettering
+    that runs along it), or less where the screen ends first."""
+    inner = min(w.w, w.h) * 0.3  # the fan reaches FAN_REACH past this; its tip is under the finger
+    sideways = abs(math.cos(angle)) > 0.5
+    return min(inner + FAN_REACH + (FAN_SIDE_EXTRA if sideways else 0.0),
+               _fan_reach(w.x + w.w / 2, w.y + w.h / 2, angle))
+
+
+# How far past a widget, a fan or a swipe's square their drawing reaches: a shadow drops 8 below, trim and rims less.
+BLEED = 14.0
+
+
+def _grown(x0: float, y0: float, x1: float, y1: float) -> tuple:
+    """The box from (x0, y0) to (x1, y1), grown by BLEED on every side, as (x, y, w, h)."""
+    return x0 - BLEED, y0 - BLEED, x1 - x0 + 2 * BLEED, y1 - y0 + 2 * BLEED
+
+
+def _fan_box(w: Widget, swipe: str) -> tuple:
+    """The box (x, y, w, h) a swipe's fan is drawn in: from its round tip at the key's middle out to its far edge."""
+    cx, cy = w.x + w.w / 2, w.y + w.h / 2
+    angle = FAN_DIRECTIONS[swipe]
+    outer = _fan_outer(w, angle)
+    xs, ys = [cx - FAN_TIP, cx + FAN_TIP], [cy - FAN_TIP, cy + FAN_TIP]
+    for a in (angle - FAN_SPREAD, angle, angle + FAN_SPREAD):
+        xs.append(cx + outer * math.cos(a))
+        ys.append(cy + outer * math.sin(a))
+    return _grown(min(xs), min(ys), max(xs), max(ys))
+
+
+def swipe_areas(pad: PadController, w: Widget) -> list:
+    """The boxes (x, y, w, h), in pad pixels, that a swipe on w can change: the key itself, and each fan or square
+    (icon mode) its swipes open, whichever is chosen. A change of swipe repaints only these: nothing else on the pad
+    changes with it."""
+    areas = [_grown(w.x, w.y, w.x + w.w, w.y + w.h)]
+    if w.kind != "number":
+        return areas + [_fan_box(w, "confirm")]  # a target button's swipe right
+    for swipe in ("up", "down", "cancel"):
+        if pad.number_icons:
+            x, y, size = swipe_square(w, swipe)
+            areas.append(_grown(x, y, x + size, y + size))
+        else:
+            areas.append(_fan_box(w, swipe))
+    return areas
+
+
+def _clip_boxes(cr) -> list | None:
+    """The boxes this paint is clipped to (a redraw of a few areas: swipe_areas), or None for one that is not a list
+    of boxes, which paints everything."""
+    try:
+        return list(cr.copy_clip_rectangle_list())
+    except Exception:  # noqa: BLE001 - cairo.Error: a clip that boxes cannot describe
+        return None
+
+
+def _in_clip(boxes: list | None, x: float, y: float, w: float, h: float) -> bool:
+    """Whether anything drawn for the box (x, y, w, h), its shadow included (BLEED), shows in this paint."""
+    return boxes is None or any(x - BLEED < bx + bw and bx < x + w + BLEED and y - BLEED < by + bh and by < y + h + BLEED
+                                for bx, by, bw, bh in boxes)
+
+
 def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
     """What lifting the finger will send from a swiped number (or a target's Enter): a rounded fan opening from the
     button in the swipe's direction, with the modifier (label) written large in it. Where the screen ends first (down,
@@ -541,8 +667,7 @@ def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
     angle = FAN_DIRECTIONS[swipe]
     sideways = abs(math.cos(angle)) > 0.5
     inner = min(w.w, w.h) * 0.3  # the fan reaches FAN_REACH past this; its tip is under the finger
-    # A sideways fan is longer: its lettering runs along it, not across.
-    outer = min(inner + FAN_REACH + (FAN_SIDE_EXTRA if sideways else 0.0), _fan_reach(cx, cy, angle))
+    outer = _fan_outer(w, angle)
     label_at = outer - min(FAN_REACH * 0.4, outer * 0.38)
     a0, a1 = angle - FAN_SPREAD, angle + FAN_SPREAD
     trim = 5 * t.trim + 4  # where the inner trim line runs
@@ -576,6 +701,136 @@ def _swipe_fan(cr, t: Theme, w: Widget, swipe: str, label: str) -> None:
     _text(cr, t, cx + label_at * math.cos(angle), cy + label_at * math.sin(angle), [label], size, color,
           max(max_w, 60.0))
 
+
+def _picture(cr, icon, x: float, y: float, size: float, radius: float, tint: tuple | None = None) -> None:
+    """A number pad icon (make_icon) filling the square at (x, y), its corners rounded, under a tint
+    ((r, g, b), alpha) if one is given."""
+    cr.save()
+    _round_rect(cr, x, y, size, size, radius)
+    cr.clip()
+    cr.save()
+    cr.translate(x, y)
+    cr.scale(size / ICON_PX, size / ICON_PX)
+    cr.set_source_surface(icon, 0, 0)
+    cr.paint()
+    cr.restore()
+    if tint:
+        cr.set_source_rgba(*tint[0], tint[1])
+        cr.paint()
+    cr.restore()
+
+
+def _tag(cr, t: Theme, cx: float, cy: float, label: str, max_w: float) -> None:
+    """Small lettering on a dark pill, centered at (cx, cy), that reads over any picture."""
+    size = _fit(cr, t, [label], ICON_TAG_TEXT, max_w - ICON_TAG_TEXT)
+    tw, th = cr.text_extents(label).width + size, size * 1.45
+    _round_rect(cr, cx - tw / 2, cy - th / 2, tw, th, th / 2)
+    cr.set_source_rgba(0, 0, 0, 0.6)
+    cr.fill()
+    _text(cr, t, cx, cy, [label], size, t.text, tw)  # every theme's lettering is light
+
+
+def _name_lines(cr, t: Theme, name: str, size: float, max_w: float, max_lines: int = NAME_LINES) -> tuple:
+    """A name broken at its spaces into at most max_lines lines, at the largest size from size down in steps of 2 at
+    which they fit in max_w, as (lines, size). Below 14 it stops: _text shrinks a word that still does not fit."""
+    font = _font(t)
+    key = ("lines", font, name, size, round(max_w), max_lines)
+    fitted = _fitted.get(key)
+    if fitted is None:
+        cr.select_font_face(font, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        words, text_size = name.split() or [name], size
+        while True:
+            cr.set_font_size(text_size)
+            lines: list = []
+            for word in words:
+                if lines and cr.text_extents(lines[-1] + " " + word).width <= max_w:
+                    lines[-1] += " " + word
+                else:
+                    lines.append(word)
+            if text_size <= 14 or (len(lines) <= max_lines
+                                   and max(cr.text_extents(line).width for line in lines) <= max_w):
+                break
+            text_size -= 2
+        if len(lines) > max_lines:
+            lines = lines[:max_lines - 1] + [" ".join(lines[max_lines - 1:])]
+        if len(_fitted) > 4096:
+            _fitted.clear()
+        fitted = _fitted[key] = (lines, text_size)
+    return fitted
+
+
+def _named_key(cr, t: Theme, w: Widget, name: str, lit: bool, label: str) -> None:
+    """A number key in icon mode without a picture, whose key holds something on the WoW action bars: its name, as
+    big as fits on up to three lines, under the number small in the top left corner."""
+    _face(cr, t, w.x, w.y, w.w, w.h, active=lit, raised=True)
+    inset = 5 * t.trim + 4
+    size = min(w.w, w.h) - 2 * inset
+    x, y = w.x + (w.w - size) / 2, w.y + (w.h - size) / 2
+    _tag(cr, t, x + 30, y + 26, label, size / 2)
+    top = 50  # below the number's tag
+    lines, text_size = _name_lines(cr, t, name, NAME_TEXT, size - 12)
+    _text(cr, t, w.x + w.w / 2, y + top + (size - top) / 2 - 4, lines, text_size, t.text_pressed if lit else t.text,
+          size - 12)
+
+
+def _icon_key(cr, t: Theme, w: Widget, icon, lit: bool, label: str) -> None:
+    """A number key in icon mode: its icon inside the trim, tinted while pressed, and its number small in the top
+    left corner, like the hotkey on an action bar."""
+    _face(cr, t, w.x, w.y, w.w, w.h, active=lit, raised=True)
+    inset = 5 * t.trim + 4  # inside the trim, Classic's thin inner line included
+    size = min(w.w, w.h) - 2 * inset
+    x, y = w.x + (w.w - size) / 2, w.y + (w.h - size) / 2
+    _picture(cr, icon, x, y, size, max(4.0, 22 * t.rounding - inset), (t.pressed[0], ICON_LIT) if lit else None)
+    _tag(cr, t, x + 30, y + 26, label, size / 2)
+
+
+SWIPE_DIM = 0.55  # how faint the swipe's square that is not chosen is
+
+
+def _swipe_square(cr, t: Theme, pad: PadController, w: Widget, swipe: str, lit: bool, opacity: float = 1.0) -> None:
+    """One swipe's square beside a number in icon mode (swipe_square): its icon with the modifier on a tag, or the
+    modifier written large where the swipe has no icon, or, where the WoW action bars say what the swipe's key holds,
+    its name above the modifier's tag. Lit like a pressed button when it is the swipe chosen, plain and faint when
+    not; cancel is red, with a cross. opacity fades it as a whole (a modifier just sent: PadController.echoes)."""
+    cancel = swipe == "cancel"
+    label = _swipe_word(pad, swipe)
+    x, y, size = swipe_square(w, swipe)
+    radius, trim = 22 * t.rounding, 5 * t.trim + 4
+    faded = opacity * (1.0 if lit else SWIPE_DIM)
+    if faded < 1.0:
+        cr.push_group()
+    top, bottom = t.danger if cancel else t.pressed if lit else t.raised
+    fill = cairo.LinearGradient(0, y, 0, y + size)
+    fill.add_color_stop_rgba(0, *top, 0.97)
+    fill.add_color_stop_rgba(1, *bottom, 0.97)
+    _shape(cr, t, lambda: _round_rect(cr, x, y, size, size, radius),
+           lambda: _round_rect(cr, x + trim, y + trim, size - 2 * trim, size - 2 * trim, radius - trim), fill, cancel)
+    cx, cy = x + size / 2, y + size / 2
+    color = t.text_pressed if lit else t.text
+    icon = None if cancel else pad.icon_surfaces.get(pad.icon_of(w.data, swipe))
+    inner = size - 2 * trim
+    if cancel:
+        _icon(cr, "cancel", cx, cy, size * 0.22, t.danger_text)
+    elif icon is None and pad.name_of(w.data, swipe):
+        lines, text_size = _name_lines(cr, t, pad.name_of(w.data, swipe), NAME_TEXT, inner - 16)
+        _text(cr, t, cx, y + trim + (inner - 52) / 2, lines, text_size, color, inner - 16)
+        _tag(cr, t, cx, y + size - trim - 26, label, inner - 16)
+    elif icon is None:
+        _text(cr, t, cx, cy, [label], 46 * size / min(w.w, w.h), color, size - 2 * FAN_LABEL_PAD)
+    else:
+        _picture(cr, icon, x + trim, y + trim, inner, max(4.0, radius - trim))
+        _tag(cr, t, cx, y + size - trim - 26, label, inner - 16)
+    if faded < 1.0:
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(faded)
+
+
+def _swipe_petals(cr, t: Theme, pad: PadController, w: Widget, swipe: str) -> None:
+    """In icon mode, what a swipe on a number can do, around the key the way each is swiped (SWIPE_SIDES): the first
+    modifier's square above it, the second's left of it, cancel's below, the one swiped toward lit, the others
+    faint."""
+    for each in ("up", "down", "cancel"):
+        _swipe_square(cr, t, pad, w, each, each == swipe)
 
 RADIAL_GAP = 8.0        # between two slices of a radial
 RADIAL_SCRIM = 0.4      # how much an open radial darkens the pad behind it
@@ -664,6 +919,10 @@ def _radial(cr, t: Theme, w: Widget, chosen: str | None, growth: float) -> None:
         full = RADIAL_HUB + 0.58 * (reach - RADIAL_HUB) + (RADIAL_GROW / 2 if lit else 0.0)
         at = RADIAL_HUB + (full - RADIAL_HUB) * opened
         color = t.danger_text if cancel else t.text_pressed if lit else t.text
+        if not cancel and not lit and slot.color:
+            # The channel's own color, as in the game's chat. The chosen slice is lettered like any pressed button:
+            # on the light ones (Dark, Game Glass) a channel's color would not stand out.
+            color = _rgb(slot.color)
         lx, ly = cx + at * math.cos(angle), cy + at * math.sin(angle)
         if not cancel and slot.icon:
             _icon(cr, slot.icon, lx, ly, RADIAL_ICON + (4 if lit else 0), color, alpha=petal)
@@ -675,7 +934,8 @@ def _radial(cr, t: Theme, w: Widget, chosen: str | None, growth: float) -> None:
     hub = full_hub * _bloom(swell)
     if hub > 1.0:
         _face(cr, t, cx - hub, cy - hub, 2 * hub, 2 * hub, radius=hub / t.rounding, raised=True)
-        _text(cr, t, cx, cy, [w.label], 30, t.text, 2 * full_hub - 24, alpha=swell)
+        if not _button_icon(cr, w.data.picture, cx, cy, 2 * full_hub * BUTTON_ICON_SHARE * 1.2, t.text, swell):
+            _text(cr, t, cx, cy, [w.label], 30, t.text, 2 * full_hub - 24, alpha=swell)
 
 
 def _status(cr, t: Theme, w: Widget, info: tuple | None) -> None:
@@ -769,12 +1029,20 @@ def _widget(cr, t: Theme, pad: PadController, w: Widget) -> None:
         active = lit or w.id in pad.swipes  # pushed in while its radial is open
         r = w.w / 2
         _face(cr, t, w.x, w.y, w.w, w.h, radius=r / t.rounding, active=active, raised=not active)
-        _text(cr, t, cx, cy, [w.label], w.size, t.text_pressed if active else t.text, 2 * r - 24)
+        color = t.text_pressed if active else t.text
+        if not _button_icon(cr, w.data.picture, cx, cy, 2 * r * BUTTON_ICON_SHARE, color):
+            _text(cr, t, cx, cy, [w.label], w.size, color, 2 * r - 24)
+    elif kind == "number" and pad.icon_of(w.data) in pad.icon_surfaces:
+        _icon_key(cr, t, w, pad.icon_surfaces[pad.icon_of(w.data)], lit, pad.number_label(w))
+    elif kind == "number" and pad.name_of(w.data):
+        _named_key(cr, t, w, pad.name_of(w.data), lit, pad.number_label(w))
     else:  # page, number, unstick, close
         number = kind == "number"
         _face(cr, t, w.x, w.y, w.w, w.h, active=lit, muted=not number, raised=number)
-        _text(cr, t, cx, cy, _wrap(w.label) if w.wrap else [w.label], w.size, t.text_pressed if lit else t.text,
-              w.w - 28)
+        color = t.text_pressed if lit else t.text
+        if not (kind == "page" and _page_icon(cr, t, w, color)):
+            label = pad.number_label(w) if number else w.label
+            _text(cr, t, cx, cy, _wrap(label) if w.wrap else [label], w.size, color, w.w - 28)
 
 
 def _swipe_word(pad: PadController, swipe: str) -> str:
@@ -792,8 +1060,9 @@ def _swipe_guide(cr, t: Theme, pad: PadController) -> None:
     y = BODY_Y + room / 2
     color = tuple(c * 0.6 * pad.hint_alpha + b * (1 - 0.6 * pad.hint_alpha) for c, b in zip(t.text, t.background))
     # The arrows are drawn, not typed: the bundled fonts have no arrow characters.
-    words = [_swipe_word(pad, swipe) for swipe in ("cancel", "up", "down")]
-    for w, word, arrow, side in zip(numbers[:3], words, ("left", "up", "down"), (-1, -1, -1)):
+    swipes = ("down", "up", "cancel")  # over the left, middle and right columns: left, up and down (SWIPE_SIDES)
+    words = [_swipe_word(pad, swipe) for swipe in swipes]
+    for w, word, arrow, side in zip(numbers[:3], words, (SWIPE_SIDES[swipe] for swipe in swipes), (-1, -1, -1)):
         cx = w.x + w.w / 2
         _text(cr, t, cx - side * 14, y, [word], 24, t.text, w.w - 50, alpha=0.6 * pad.hint_alpha)
         half = cr.text_extents(word).width / 2
@@ -841,11 +1110,16 @@ def _paint_pad(cr, t: Theme, pad: PadController) -> None:
     tabs = [w for w in pad.widgets if w.kind == "tab"]
     # The page tabs share one lettering size: the largest at which every one of them fits.
     _tab_size = min((_fit(cr, t, [w.label], w.size, w.w - 28) for w in tabs), default=0)
+    # A redraw of a swipe's areas paints only the panels and widgets under them. The overlays are few, and drawn
+    # whole: the clip keeps them in.
+    boxes = _clip_boxes(cr)
     for x, y, w, h, strong in pad.panels:
-        _panel(cr, t, x, y, w, h, strong)
+        if _in_clip(boxes, x, y, w, h):
+            _panel(cr, t, x, y, w, h, strong)
     # The scroll strip lies on the trackpad surface, so it is painted after it.
     for widget in sorted(pad.widgets, key=lambda w: w.kind == "strip"):
-        _widget(cr, t, pad, widget)
+        if _in_clip(boxes, widget.x, widget.y, widget.w, widget.h):
+            _widget(cr, t, pad, widget)
     if pad.view == "settings":
         _settings(cr, t, pad)
     elif pad.view == "pad":
@@ -853,11 +1127,20 @@ def _paint_pad(cr, t: Theme, pad: PadController) -> None:
     # Key previews last: they reach over the keys above and over the trackpad. The swipes are read once: the touch
     # thread may change them while this paints.
     swipes = dict(pad.swipes)
+    if pad.number_icons:
+        # A modifier just sent stays in its square a moment, fading (a cancel goes at once). Under the live swipes'
+        # squares, so that a neighbour's fading square never hides which of them is lit.
+        for widget, swipe, opacity in pad.echoes():
+            _swipe_square(cr, t, pad, widget, swipe, True, opacity)
     for widget in pad.widgets:
         if widget.kind == "key" and widget.data.action == "input" and pad.lit(widget):
             _preview(cr, t, widget, pad.key_typed.get(widget.id) or pad.key_label(widget.data))
         elif widget.kind == "number" and widget.id in swipes:
-            _swipe_fan(cr, t, widget, swipes[widget.id], _swipe_word(pad, swipes[widget.id]))
+            swipe = swipes[widget.id]
+            if pad.number_icons:
+                _swipe_petals(cr, t, pad, widget, swipe)
+            else:
+                _swipe_fan(cr, t, widget, swipe, _swipe_word(pad, swipe))
         elif widget.kind == "page" and widget.id in swipes and not widget.data.radial:
             _swipe_fan(cr, t, widget, "confirm", "Enter")
     # An open radial goes over everything, fans included.

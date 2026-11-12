@@ -10,8 +10,10 @@ root, every file written in the user's home below could be redirected by a link 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -33,7 +35,9 @@ def _log(text: str, error: bool = False) -> None:
         (decky.logger.error if error else decky.logger.info)(text)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.append(str(Path(__file__).resolve().parent / "driver/bin"))
 import ayn_button  # noqa: E402
+import wow_bars  # noqa: E402 - what the JarnGrip WoW addon saved, as the pad reads it
 
 PLUGIN = Path(__file__).resolve().parent
 HOME = Path("/var/home/armada")
@@ -47,12 +51,31 @@ UNIT_FILE = HOME / ".config/systemd/user" / UNIT
 LISTENER_FILE = UNIT_FILE.parent / "jarngrip-ayn.service"
 PAUSED_UNITS = (("ratatoskr", "touch-master.service"), ("bottom_screen", "armada-bottom-screen.service"))
 THEMES = ("classic", "charcoal", "dark", "glass")
-# The games the pad has a layout for (pad_model.GAMES). Each keeps its own remapped controls and profiles: the current
-# game's are at the top of the config, the others' set aside under "games".
+# The games the pad has a layout for (pad_model.GAMES). Each keeps its own remapped controls, number pad icons and
+# profiles: the current game's are at the top of the config, the others' set aside under "games".
 GAMES = ("wow", "ffxi", "desktop")
-PER_GAME = ("bindings", "profiles", "active_profile")
+PER_GAME = ("bindings", "icons", "number_icons", "profiles", "active_profile")
 BACKGROUNDS = HOME / "Pictures/JarnGrip"
-PICTURE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
+PICTURE_TYPES = wow_bars.PICTURE_TYPES  # what the pad can show
+# The number pad's icons, a folder per game (Icons/wow, Icons/ffxi). An icon is saved under its number's id, and its
+# swipes' under the id and the swipe (pad_model.icon_id): "slot_5", "slot_5:up", "slot_5:down".
+ICONS = BACKGROUNDS / "Icons"
+ICON_ID = re.compile(r"slot_([1-9]|1[0-2])(:up|:down)?")
+# Steam's browser cannot open files in the home folder, so the icon page gets each picture it shows as a data: URI, up
+# to this size: an icon is a few kilobytes, and a bigger picture is listed by its name alone. It asks for at most
+# PREVIEW_BATCH at a time (the numbers' and a page of the picker's), never for a whole folder of thousands, and one
+# reply holds at most PREVIEW_REPLY bytes of pictures: the rest are named in it, for the page to ask for next.
+PREVIEW_MAX = 256 * 1024
+PREVIEW_BATCH = 200
+PREVIEW_REPLY = 8 * 1024 * 1024
+PICTURE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+# "Fill from file names": a picture named for a number, and maybe a swipe, goes on it. The number is 1 to 9, 0, minus or
+# equals; the swipe up, left, or the modifier it adds in that game (pad_model.Game.swipes); tap or nothing is the tap.
+# "down" still names the second modifier's swipe, as it was swiped down for before it went left.
+# Anything after them names the picture: "5.png", "5-fireball.png", "5 shift frostbolt.png", "minus_left.png".
+NUMBER_NAMES = {**{str(i): f"slot_{i}" for i in range(1, 10)}, "0": "slot_10", "minus": "slot_11", "equals": "slot_12"}
+SWIPE_WORDS = {"wow": {"shift": "up", "ctrl": "down"}, "ffxi": {"ctrl": "up", "alt": "down"}}
+NAMED_ICON = re.compile(r"([0-9]|minus|equals)(?:[-_ ]+(tap|up|left|down|shift|ctrl|alt))?(?=$|[-_ ])", re.IGNORECASE)
 # Desktop Mode: the pad in the KDE app menu, and started with the desktop when "Start with Desktop Mode" is on.
 APP_MENU = HOME / ".local/share/applications/jarngrip.desktop"
 AUTOSTART = HOME / ".config/autostart/jarngrip.desktop"
@@ -73,8 +96,10 @@ DEFAULT = {
     "haptics_strength": 1.0, "burn_in": True, "clock_24h": False, "background_image": "", "glass_blur": 3, "desktop_mode": False,
     "shortcut": True, "shortcut_buttons": [1 << 13 | 1 << 14, 0], "ayn_button": False,
     "ayn_no_screenshot": False,
-    "bindings": {}, "profiles": {"Default": {"bindings": {}}}, "active_profile": "Default",
+    "bindings": {}, "icons": {}, "number_icons": False, "profiles": {"Default": {"bindings": {}, "icons": {}}},
+    "active_profile": "Default",
     "game": "wow", "games": {},
+    "wow_bars": True,  # in WoW, keys without a picture of their own show what the action bars hold (wow_bars.py)
 }
 
 
@@ -139,6 +164,8 @@ def _read() -> dict:
         pass
     if not isinstance(cfg.get("bindings"), dict):
         cfg["bindings"] = {}
+    if not isinstance(cfg.get("icons"), dict):
+        cfg["icons"] = {}
     if not isinstance(cfg.get("profiles"), dict) or not cfg["profiles"]:
         cfg["profiles"] = json.loads(json.dumps(DEFAULT["profiles"]))
     if cfg.get("game") not in GAMES:
@@ -181,6 +208,14 @@ def _install_runtime() -> bool:
     _mkdir(APP / "fonts")
     for source in (PLUGIN / "driver/fonts").iterdir():
         changed |= _copy_if_changed(source, APP / "fonts" / source.name, 0o644)
+    # The button icons (driver/icons): those taken out of the plugin go from the home folder too.
+    _mkdir(APP / "icons")
+    icons = sorted((PLUGIN / "driver/icons").glob("*.png")) if (PLUGIN / "driver/icons").is_dir() else []
+    for source in icons:
+        changed |= _copy_if_changed(source, APP / "icons" / source.name, 0o644)
+    for stale in set((APP / "icons").glob("*.png")) - {APP / "icons" / source.name for source in icons}:
+        stale.unlink()
+        changed = True
     _mkdir(UNIT_FILE.parent)
     changed |= _copy_if_changed(PLUGIN / "systemd" / UNIT, UNIT_FILE, 0o644)
     changed |= _copy_if_changed(PLUGIN / "systemd" / LISTENER_FILE.name, LISTENER_FILE, 0o644)
@@ -207,6 +242,73 @@ def _backgrounds() -> list:
         return sorted(p.name for p in BACKGROUNDS.iterdir() if p.is_file() and p.suffix.lower() in PICTURE_TYPES)
     except OSError:
         return []
+
+
+def _icons(game: str) -> list:
+    """The pictures in a game's icon folder."""
+    return wow_bars.list_pictures(ICONS / game)
+
+
+def _previews(game: str, names: list) -> dict:
+    """{"previews": file name -> data: URI, "more": [file name]}: the pictures in a game's icon folder small enough to
+    preview, up to PREVIEW_REPLY bytes of them, and those left for another reply. The first always fits."""
+    previews, more, total = {}, [], 0
+    for name in names:
+        path = ICONS / game / name
+        try:
+            size = path.stat().st_size
+            if size > PREVIEW_MAX:
+                continue
+            if previews and total + size > PREVIEW_REPLY:
+                more.append(name)
+                continue
+            data = path.read_bytes()
+            total += len(data)
+            previews[name] = f"data:{PICTURE_MIME[path.suffix.lower()]};base64,{base64.b64encode(data).decode('ascii')}"
+        except OSError:
+            pass
+    return {"previews": previews, "more": more}
+
+
+def _named_icons(game: str, names: list) -> dict:
+    """The icons that pictures named for a number and swipe (NAMED_ICON) ask for: icon id -> file name. Where two
+    pictures ask for the same one, the first by name wins."""
+    icons: dict = {}
+    for name in sorted(names):
+        found = NAMED_ICON.match(Path(name).stem)
+        if not found:
+            continue
+        word = (found.group(2) or "tap").lower()
+        swipe = {"tap": "", "up": "up", "left": "down", "down": "down", **SWIPE_WORDS.get(game, {})}.get(word)
+        if swipe is None:  # a modifier this game's swipes do not add: Alt in WoW, Shift in FFXI
+            continue
+        slot = NUMBER_NAMES[found.group(1).lower()]
+        icons.setdefault(f"{slot}:{swipe}" if swipe else slot, name)
+    return icons
+
+
+def _wow_bars(cfg: dict) -> dict:
+    """What the pad shows of the WoW action bars (wow_bars.pad_bars), and where it read them. Nothing outside WoW: the
+    search and the icon list (which can be the whole community listfile) are not read for nothing."""
+    if cfg.get("game") != "wow":
+        return {"file": "", "character": "", "spec": "", "saved": 0, "keys": {}, "icon_list": False, "jis": False}
+    folder = ICONS / "wow"
+    found = wow_bars.find_file(HOME, folder)
+    names = wow_bars.read_icon_names(folder / wow_bars.ICON_NAMES)
+    bars, keys = wow_bars.lookup(found, folder, cfg.get("bindings"), names)
+    return {"file": str(found or ""), "character": bars.get("character", ""), "spec": bars.get("spec") or "",
+            "saved": bars.get("saved", 0), "keys": keys, "icon_list": (folder / wow_bars.ICON_NAMES).is_file(),
+            "jis": bars.get("jis", False)}
+
+
+def _icon_map(value) -> dict:
+    """The icons of a config or profile, keeping only a number's id or a swipe's against a picture's plain file name
+    (never a path). A picture that is not in the folder (yet) is kept: its key shows its number meanwhile."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: name for key, name in value.items()
+            if isinstance(key, str) and ICON_ID.fullmatch(key) and isinstance(name, str) and name
+            and Path(name).name == name and not name.startswith(".") and Path(name).suffix.lower() in PICTURE_TYPES}
 
 
 def _restore_paused() -> None:
@@ -475,10 +577,13 @@ class Plugin:
         ayn_before = (current.get("ayn_button"), current.get("ayn_no_screenshot"))
         if isinstance(cfg.get("bindings"), dict):
             current["bindings"] = cfg["bindings"]
+        if isinstance(cfg.get("icons"), dict):
+            current["icons"] = _icon_map(cfg["icons"])
         current["sensitivity"] = _number(cfg.get("sensitivity"), 0.2, 3.0, current["sensitivity"])
         current["haptics_strength"] = _number(cfg.get("haptics_strength"), 0.05, 1.0, current["haptics_strength"])
         current["glass_blur"] = int(_number(cfg.get("glass_blur"), 1, 5, current["glass_blur"]))
-        for key in ("haptics", "burn_in", "clock_24h", "desktop_mode", "shortcut", "ayn_button", "ayn_no_screenshot"):
+        for key in ("haptics", "burn_in", "clock_24h", "desktop_mode", "shortcut", "ayn_button", "ayn_no_screenshot",
+                    "number_icons", "wow_bars"):
             if key in cfg:
                 current[key] = bool(cfg[key])
         if "desktop_mode" in cfg:
@@ -502,6 +607,39 @@ class Plugin:
         _mkdir(BACKGROUNDS)
         return {"folder": str(BACKGROUNDS), "pictures": _backgrounds()}
 
+    async def list_icons(self):
+        """The current game's icon folder, made if it is missing, and the pictures in it."""
+        game = _read()["game"]
+        _mkdir(ICONS / game)
+        return {"folder": str(ICONS / game), "icons": await _bg(_icons, game)}  # a folder may hold thousands
+
+    async def icon_previews(self, names):
+        """For the icon page: the pictures it shows, by file name, as data: URIs (_previews). Only pictures in the
+        current game's icon folder; at most PREVIEW_BATCH of them, and as many as fit in PREVIEW_REPLY bytes: those
+        left over are in "more", to ask for again."""
+        if not isinstance(names, list):
+            return {"previews": {}, "more": []}
+        game = _read()["game"]
+        present = set(await _bg(_icons, game))
+        wanted = [name for name in names if isinstance(name, str) and name in present]
+        reply = await _bg(_previews, game, wanted[:PREVIEW_BATCH])
+        reply["more"] += wanted[PREVIEW_BATCH:]
+        return reply
+
+    async def wow_bars(self):
+        """For the icon page: what the WoW addon saved of the action bars, as the pad shows it. file is "" until the
+        addon has saved (it does on logout or /reload); keys is icon id -> {"name", "picture"}."""
+        return await _bg(_wow_bars, _read())
+
+    async def fill_icons(self):
+        """Put every picture in the current game's icon folder that is named for a number and swipe on it, in place of
+        what that number or swipe showed. The others keep theirs."""
+        cfg = _read()
+        named = _icon_map(_named_icons(cfg["game"], await _bg(_icons, cfg["game"])))
+        cfg["icons"] = {**_icon_map(cfg["icons"]), **named}
+        _write(cfg)
+        return {"ok": True, "config": cfg, "filled": len(named)}
+
     async def select_game(self, game):
         """Lay the pad out for another game. The current game's controls and profiles are set aside, and the other
         game's brought back: a fresh Default profile the first time."""
@@ -523,17 +661,18 @@ class Plugin:
         if not isinstance(profile, dict):
             return {"ok": False, "error": "unknown profile"}
         cfg["bindings"] = dict(profile.get("bindings") or {})
+        cfg["icons"] = _icon_map(profile.get("icons"))
         cfg["active_profile"] = name
         _write(cfg)
         return {"ok": True, "config": cfg}
 
     async def save_profile(self, name):
-        """Save the current bindings as a profile, new or existing, and make it the active one."""
+        """Save the current bindings and number pad icons as a profile, new or existing, and make it the active one."""
         name = name.strip() if isinstance(name, str) else ""
         if not 0 < len(name) <= 24:
             return {"ok": False, "error": "A profile name is 1 to 24 characters."}
         cfg = _read()
-        cfg["profiles"][name] = {"bindings": dict(cfg["bindings"])}
+        cfg["profiles"][name] = {"bindings": dict(cfg["bindings"]), "icons": dict(cfg["icons"])}
         cfg["active_profile"] = name
         _write(cfg)
         return {"ok": True, "config": cfg}
@@ -546,6 +685,7 @@ class Plugin:
         if cfg["active_profile"] == name:
             cfg["active_profile"] = next(iter(cfg["profiles"]))
             cfg["bindings"] = dict(cfg["profiles"][cfg["active_profile"]].get("bindings") or {})
+            cfg["icons"] = _icon_map(cfg["profiles"][cfg["active_profile"]].get("icons"))
         _write(cfg)
         return {"ok": True, "config": cfg}
 
