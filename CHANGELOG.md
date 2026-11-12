@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
 
 - **A status card under the clock.** Tap the clock and battery and a card opens over the pad: the **network** (Wi-Fi name, signal, band and speed, the Thor's IP address, and whether the internet is reachable), the **battery** (charge, time left or until full, the watts it charges or draws at, its health and cycles) and the **temperatures** (CPU, GPU, battery, and the fan's speed). A touch anywhere closes it without pressing what is under it, and it closes by itself after 20 seconds so that it never sits on the screen. The pad sends nothing over the network to fill it: the internet check is NetworkManager's own.
 - **Swipes keep up with your thumb in game.** Changing a number's swipe from up to left or down (or a target's swipe right) redrew late while a game was running: the pad asked for one redraw per change, and it waited its turn. While a finger is on a number or a target, the pad now repaints every frame, as the Chat radial does while it opens, but only the key and the fans or squares its swipes open; the rest of the pad is left alone. A Shift or Ctrl square fading after you lift repaints only its own area too.
