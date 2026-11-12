@@ -55,4 +55,4 @@ JarnGrip ships no pictures for the number pad. The ones you add, including any g
 
 ## Trademarks
 
-The project includes no World of Warcraft or Blizzard assets (the guide links to a third-party pack of WoW icons, which JarnGrip does not include), game files, fonts, logos or executables, and no Valve assets. World of Warcraft is a trademark of Blizzard Entertainment; Steam and SteamOS are trademarks of Valve Corporation; AYN Thor is a product of AYN. These names are used only to describe compatibility. This is an unofficial community project, not affiliated with or endorsed by any of them.
+The project includes no World of Warcraft or Blizzard assets, game files, fonts, logos or executables, and no Valve assets. World of Warcraft is a trademark of Blizzard Entertainment; Steam and SteamOS are trademarks of Valve Corporation; AYN Thor is a product of AYN. These names are used only to describe compatibility. This is an unofficial community project, not affiliated with or endorsed by any of them.
