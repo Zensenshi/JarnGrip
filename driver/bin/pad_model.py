@@ -20,8 +20,8 @@ second-screen pad of AYN-Thor-WoW-Launcher (https://github.com/wyattabuntjer/AYN
 - The Desktop profile, for everything that is not a game, has no number block: its pages take the whole width, two
   columns each. Its keyboard has F1 to F12, Super and the arrows in place of its small trackpad, and its trackpad Back,
   Copy, Paste and Forward in place of the modifiers, and pinch to zoom.
-- With number pad icons on, the number keys are square and show the player's own pictures, like a stream deck: one for
-  the tap and one for each swipe. A swipe opens squares around the key in place of the fan, with their icons: the first
+- With number pad icons on, the number keys are square and show the player's own pictures: one for the
+  tap and one for each swipe. A swipe opens squares around the key in place of the fan, with their icons: the first
   modifier's above it, the second's left of it, cancel's below, the one swiped toward lit. A modifier's square fades
   for SWIPE_FADE_S after the key is sent. Only the drawing changes: the keys send what they always did.
 """

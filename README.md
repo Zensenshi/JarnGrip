@@ -8,7 +8,7 @@ JarnGrip is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) 
 
 - **Pages** of buttons for the game's default keys, for **WoW** or **FFXI**, or a **Desktop** profile for the desktop and the web (picked in Decky).
 - **Number pad** with swipes: Shift and Ctrl for WoW's action bars, Ctrl and Alt for FFXI's two macro bars.
-- **Number pad icons**: put your own pictures on the numbers and their swipes, like a Stream Deck, or let the JarnGrip WoW addon show your action bars' icons and spell names on them.
+- **Number pad icons**: put your own pictures on the numbers and their swipes, or let the JarnGrip WoW addon show your action bars' icons and spell names on them.
 - **Trackpad** and **keyboard**, one tap away.
 - **Four themes**: Classic, Charcoal, Dark, and Game Glass over a picture of your choice.
 - **Haptics**, a **clock and battery** that open a **status card** (network, battery and temperatures) with a tap, and **burn-in protection** for the OLED screen.
